@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: decasport-db
+    environment:
+      POSTGRES_DB: decasport
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: decasport123
+    ports:
+      - "5432:5432"
+    volumes:
+      - decasport_datos:/var/lib/postgresql
+
+volumes:
+  decasport_datos:
