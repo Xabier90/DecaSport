@@ -95,6 +95,61 @@ public class Inventario {
         }
     }
 
+    // COMPRAS: solo los componentes por debajo del stock minimo
+    public static void verComponentesAComprar(Connection con) throws SQLException {
+        String sql = "SELECT cf.id_componente, p.nombre, cf.nombre, cf.stock_actual, cf.stock_minimo, "
+                   + "cf.stock_minimo - cf.stock_actual, COALESCE(pv.nombre, '(sin proveedor)') "
+                   + "FROM componentes_fabricacion cf "
+                   + "JOIN productos p ON p.id_producto = cf.id_producto "
+                   + "LEFT JOIN proveedores pv ON pv.id_proveedor = cf.id_proveedor "
+                   + "WHERE cf.stock_actual < cf.stock_minimo ORDER BY 6 DESC";
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            System.out.println("\n--- COMPONENTES QUE HAY QUE COMPRAR ---");
+            boolean hay = false;
+            while (rs.next()) {
+                hay = true;
+                System.out.printf("%d. [%s] %s | stock: %d | minimo: %d | faltan: %d | proveedor: %s%n",
+                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4),
+                        rs.getInt(5), rs.getInt(6), rs.getString(7));
+            }
+            if (!hay) System.out.println("No hay que comprar nada: todo esta por encima del minimo");
+        }
+    }
+
+    // FABRICACION: piezas que lleva un producto y cuantas unidades se pueden montar
+    public static void verPiezasDeProducto(Connection con) throws SQLException {
+        String sqlProductos = "SELECT DISTINCT p.id_producto, p.nombre FROM productos p "
+                            + "JOIN componentes_fabricacion cf ON cf.id_producto = p.id_producto "
+                            + "ORDER BY p.id_producto";
+        boolean hay = false;
+        System.out.println("\n--- PRODUCTOS QUE SE FABRICAN ---");
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sqlProductos)) {
+            while (rs.next()) {
+                hay = true;
+                System.out.printf("%d. %s%n", rs.getInt(1), rs.getString(2));
+            }
+        }
+        if (!hay) {
+            System.out.println("Ningun producto tiene piezas definidas (las define Inventario)");
+            return;
+        }
+        int idProducto = Utilidades.leerEntero("ID del producto (0 = cancelar): ");
+        if (idProducto == 0) return;
+        List<Comp> piezas = cargarComponentes(con, idProducto, false);
+        if (piezas.isEmpty()) {
+            System.out.println("Ese producto no tiene piezas definidas");
+            return;
+        }
+        int sePuedenMontar = Integer.MAX_VALUE;
+        System.out.println("\n--- PIEZAS PARA MONTAR 1 UNIDAD ---");
+        for (Comp c : piezas) {
+            System.out.printf("%s | necesarias: %d | en stock: %d | %s%n", c.nombre(), c.necesaria(), c.stock(),
+                    c.stock() >= c.necesaria() ? "OK" : "FALTAN PIEZAS");
+            sePuedenMontar = Math.min(sePuedenMontar, c.stock() / c.necesaria());
+        }
+        System.out.println("Con el stock actual se pueden montar " + sePuedenMontar + " unidad(es)");
+    }
+
     public static void verProveedores(Connection con) throws SQLException {
         String sql = "SELECT id_proveedor, nombre, COALESCE(email, '-'), COALESCE(telefono, '-') "
                    + "FROM proveedores ORDER BY id_proveedor";
@@ -110,10 +165,10 @@ public class Inventario {
     }
 
     // ============================================================
-    // PRODUCTOS (solo administrador)
+    // PRODUCTOS (departamento de inventario o administrador)
     // ============================================================
     public static void anadirProducto(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("inventario")) return;
         System.out.print("Nombre: ");
         String nombre = Utilidades.leerLinea().trim();
         System.out.print("Categoria: ");
@@ -160,8 +215,10 @@ public class Inventario {
     }
 
     public static void editarProducto(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
-        int id = Utilidades.leerEntero("ID del producto a editar: ");
+        if (!Usuarios.exigir("inventario")) return;
+        verProductos(con);
+        int id = Utilidades.leerEntero("ID del producto a editar (0 = cancelar): ");
+        if (id == 0) return;
 
         String nombreActual;
         String categoriaActual;
@@ -217,8 +274,10 @@ public class Inventario {
     }
 
     public static void borrarProducto(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
-        int id = Utilidades.leerEntero("ID del producto a borrar: ");
+        if (!Usuarios.exigir("inventario")) return;
+        verProductos(con);
+        int id = Utilidades.leerEntero("ID del producto a borrar (0 = cancelar): ");
+        if (id == 0) return;
         if (!Utilidades.preguntarSiNo("Seguro que quieres borrarlo?")) {
             System.out.println("Cancelado");
             return;
@@ -255,10 +314,10 @@ public class Inventario {
     }
 
     // ============================================================
-    // COMPONENTES DE FABRICACION (solo administrador)
+    // COMPONENTES DE FABRICACION (departamento de inventario o administrador)
     // ============================================================
     public static void anadirComponente(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("inventario")) return;
         verProductos(con);
         int idProducto = Utilidades.leerEntero("ID del producto que usa este componente (0 = cancelar): ");
         if (idProducto == 0) return;
@@ -302,7 +361,7 @@ public class Inventario {
     }
 
     public static void editarComponente(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("inventario")) return;
         verComponentes(con);
         int id = Utilidades.leerEntero("ID del componente a editar (0 = cancelar): ");
         if (id == 0) return;
@@ -364,7 +423,7 @@ public class Inventario {
     }
 
     public static void borrarComponente(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("inventario")) return;
         verComponentes(con);
         int id = Utilidades.leerEntero("ID del componente a borrar (0 = cancelar): ");
         if (id == 0) return;
@@ -388,7 +447,7 @@ public class Inventario {
     // COMPRAS
     // ============================================================
     public static void crearCompraManual(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("compras")) return;
         verComponentes(con);
         int id = Utilidades.leerEntero("ID del componente a comprar (0 = cancelar): ");
         if (id == 0) return;
@@ -434,7 +493,7 @@ public class Inventario {
     }
 
     public static void recibirCompraMenu(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("compras")) return;
         verCompras(con);
         int id = Utilidades.leerEntero("ID del pedido de compra recibido (0 = cancelar): ");
         if (id == 0) return;
@@ -513,7 +572,7 @@ public class Inventario {
     // FABRICACION
     // ============================================================
     public static void terminarOrdenMenu(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("fabricacion")) return;
         verFabricacion(con);
         int id = Utilidades.leerEntero("ID de la orden a terminar (0 = cancelar): ");
         if (id == 0) return;
@@ -566,6 +625,17 @@ public class Inventario {
                     "UPDATE fabricacion SET estado = 'Terminada' WHERE id_montaje = ?")) {
                 ps.setInt(1, idMontaje);
                 ps.executeUpdate();
+            }
+            // Si era la ultima orden del pedido, el pedido queda listo para que Ventas lo envie y facture
+            try (PreparedStatement ps = con.prepareStatement(
+                    "UPDATE pedidos SET estado = 'Listo envio' WHERE estado = 'En fabricacion' "
+                    + "AND id_pedido = (SELECT id_pedido FROM fabricacion WHERE id_montaje = ?) "
+                    + "AND NOT EXISTS (SELECT 1 FROM fabricacion f WHERE f.id_pedido = pedidos.id_pedido "
+                    + "AND f.estado <> 'Terminada')")) {
+                ps.setInt(1, idMontaje);
+                if (ps.executeUpdate() > 0) {
+                    System.out.println("Todas las ordenes del pedido estan terminadas: el pedido queda 'Listo envio'");
+                }
             }
             con.commit();
             return true;

@@ -5,13 +5,14 @@ Lo lanza proceso.py con Popen. Protocolo de entrada/salida:
   stdin  <- petición (el padre cierra stdin al terminar de escribir)
   stdout -> resultado (una línea)
   stderr -> diagnóstico (PID/PPID) y errores
-  código de salida: 0 ok | 1 uso incorrecto | 2 datos inválidos | 143 cierre por SIGTERM
+  código de salida: 0 ok | 1 uso incorrecto | 2 datos inválidos | 143 cierre por SIGTERM/SIGBREAK
 
 Uso:  python subproceso.py <stock|albaran|factura|crm>
 
 Para probar la cancelación desde el padre, la petición puede ser:
-  __LENTO__  tarda 30 s pero atiende SIGTERM   -> basta terminate() (fase 1)
-  __SORDO__  tarda 30 s e IGNORA SIGTERM       -> hace falta kill() (fase 2)
+  __LENTO__  tarda 30 s pero atiende la señal de terminar -> basta la fase 1
+  __SORDO__  tarda 30 s e IGNORA la señal de terminar     -> hace falta kill() (fase 2)
+La señal de terminar es SIGTERM en Linux y SIGBREAK (CTRL_BREAK) en Windows.
 """
 from __future__ import annotations
 
@@ -32,6 +33,10 @@ DURACION_SIMULADA = 30.0
 
 IVA = Decimal("0.21")
 CENTIMO = Decimal("0.01")
+
+# Señales que el padre usa como "termina por las buenas" (SIGBREAK solo existe en Windows)
+SENALES_TERMINAR = [s for s in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGBREAK", None))
+                    if s is not None]
 
 # Mismos datos de conexión que el programa Java
 DATOS_BD = dict(host="192.168.28.159", port=5432, dbname="decasport",
@@ -131,11 +136,26 @@ def _configurar_senales(nombre: str) -> None:
     # Ctrl+C llega a todo el grupo de procesos: el hijo lo ignora y obedece al padre.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    def al_recibir_sigterm(signum, frame):
-        print(f"[{nombre}] SIGTERM recibida: cierre ordenado", file=sys.stderr, flush=True)
+    def al_recibir_terminar(signum, frame):
+        print(f"[{nombre}] {signal.Signals(signum).name} recibida: cierre ordenado",
+              file=sys.stderr, flush=True)
         sys.exit(EXIT_SIGTERM)
 
-    signal.signal(signal.SIGTERM, al_recibir_sigterm)
+    for senal in SENALES_TERMINAR:
+        signal.signal(senal, al_recibir_terminar)
+
+
+def _ignorar_terminar() -> None:
+    for senal in SENALES_TERMINAR:
+        signal.signal(senal, signal.SIG_IGN)
+
+
+def _esperar(segundos: float) -> None:
+    """Espera en tramos cortos: así un manejador de señal se ejecuta enseguida
+    (en Windows time.sleep() largo no se interrumpe con SIGBREAK)."""
+    fin = time.monotonic() + segundos
+    while (restante := fin - time.monotonic()) > 0:
+        time.sleep(min(0.1, restante))
 
 
 def main(argv: list[str]) -> int:
@@ -153,10 +173,10 @@ def main(argv: list[str]) -> int:
     datos = sys.stdin.read().strip()
 
     if datos == "__LENTO__":
-        time.sleep(DURACION_SIMULADA)
+        _esperar(DURACION_SIMULADA)
     elif datos == "__SORDO__":
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        time.sleep(DURACION_SIMULADA)
+        _ignorar_terminar()
+        _esperar(DURACION_SIMULADA)
     else:
         time.sleep(random.uniform(0.2, 0.8))   # trabajo simulado
 

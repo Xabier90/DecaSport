@@ -9,15 +9,34 @@ public class Usuarios {
 
     // Usuario que ha iniciado sesion
     public static int idUsuarioActual;
+    public static String nombreActual;
     public static String rolActual;
 
     // ---------- PERMISOS ----------
+    // Departamentos del ERP: cada uno tiene su propio usuario y su propio menu
+    public static final String[] DEPARTAMENTOS = {"crm", "ventas", "compras", "inventario", "fabricacion"};
+
     public static boolean esAdmin() {
         return "administrador".equals(rolActual);
     }
 
+    // El administrador puede entrar en todo; el resto solo en su departamento
+    public static boolean tieneAcceso(String departamento) {
+        return esAdmin() || departamento.equals(rolActual);
+    }
+
+    // Comprueba el permiso y avisa si no lo tiene
+    public static boolean exigir(String departamento) {
+        if (!tieneAcceso(departamento)) {
+            System.out.println("No tienes permiso para hacer esto. Solo el departamento de "
+                    + departamento.toUpperCase() + " o el administrador pueden.");
+            return false;
+        }
+        return true;
+    }
+
     public static boolean puedeCrearOportunidad() {
-        return esAdmin() || "comercial".equals(rolActual);
+        return tieneAcceso("crm");
     }
 
     public static boolean exigirAdmin() {
@@ -28,8 +47,9 @@ public class Usuarios {
         return true;
     }
 
-    // ---------- ADMIN POR DEFECTO ----------
-    public static void crearAdminPorDefecto(Connection con) throws SQLException {
+    // ---------- USUARIOS POR DEFECTO ----------
+    // Crea el administrador y un usuario por departamento si todavia no existen
+    public static void crearUsuariosPorDefecto(Connection con) throws SQLException {
         String sql = "SELECT COUNT(*) FROM usuarios u JOIN roles r ON r.id_rol = u.id_rol "
                    + "WHERE r.nombre_rol = 'administrador'";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
@@ -37,6 +57,47 @@ public class Usuarios {
             if (rs.getInt(1) == 0) {
                 crearUsuario(con, "admin", "admin123", "administrador");
                 System.out.println("Se ha creado el administrador por defecto: admin / admin123");
+            }
+        }
+        // Usuario de cada departamento: nombre = departamento, contrasena = departamento + "123"
+        for (String dep : DEPARTAMENTOS) {
+            if (!existeUsuario(con, dep)) {
+                crearUsuario(con, dep, dep + "123", dep);
+                System.out.println("Se ha creado el usuario del departamento: " + dep + " / " + dep + "123");
+            }
+        }
+    }
+
+    // Usuarios creados antes de que existieran los departamentos (rol 'trabajador' o 'comercial'):
+    // se pasan a su departamento para que cada uno vea solo su menu
+    public static void corregirRolesAntiguos(Connection con) throws SQLException {
+        String[][] cambios = {
+            {"comercial", "crm"},
+            {"ventas", "ventas"},
+            {"compras", "compras"},
+            {"almacenero", "inventario"},
+            {"operario", "fabricacion"}
+        };
+        String sql = "UPDATE usuarios SET id_rol = (SELECT id_rol FROM roles WHERE nombre_rol = ?) "
+                   + "WHERE nombre_usuario = ? AND id_rol IN "
+                   + "(SELECT id_rol FROM roles WHERE nombre_rol IN ('trabajador', 'comercial'))";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            for (String[] c : cambios) {
+                ps.setString(1, c[1]);
+                ps.setString(2, c[0]);
+                if (ps.executeUpdate() > 0) {
+                    System.out.println("El usuario '" + c[0] + "' pasa al departamento " + c[1].toUpperCase());
+                }
+            }
+        }
+    }
+
+    private static boolean existeUsuario(Connection con, String nombre) throws SQLException {
+        try (PreparedStatement ps = con.prepareStatement(
+                "SELECT 1 FROM usuarios WHERE nombre_usuario = ?")) {
+            ps.setString(1, nombre);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
             }
         }
     }
@@ -96,6 +157,7 @@ public class Usuarios {
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     idUsuarioActual = rs.getInt("id_usuario");
+                    nombreActual = usuario;
                     rolActual = rs.getString("nombre_rol");
                     System.out.println("Bienvenido, " + usuario + " (" + rolActual + ")");
                     return true;
@@ -113,9 +175,13 @@ public class Usuarios {
         String usuario = Utilidades.leerLinea().trim();
         System.out.print("Contrasena: ");
         String pass = Utilidades.leerLinea();
-        System.out.println("Rol: 1. trabajador   2. comercial   3. administrador");
+        System.out.println("Rol: 1. crm   2. ventas   3. compras   4. inventario   5. fabricacion   6. administrador");
         int op = Utilidades.leerEntero("Opcion: ");
-        String rol = (op == 3) ? "administrador" : (op == 2) ? "comercial" : "trabajador";
+        if (op < 1 || op > 6) {
+            System.out.println("Rol no valido");
+            return;
+        }
+        String rol = (op == 6) ? "administrador" : DEPARTAMENTOS[op - 1];
 
         if (usuario.isEmpty() || pass.isEmpty()) {
             System.out.println("Usuario y contrasena son obligatorios");
@@ -131,6 +197,44 @@ public class Usuarios {
                 throw e;
             }
         }
+    }
+
+    // El administrador cambia el departamento (rol) de un trabajador
+    public static void cambiarDepartamento(Connection con) throws SQLException {
+        if (!exigirAdmin()) return;
+        String sql = "SELECT u.id_usuario, u.nombre_usuario, r.nombre_rol FROM usuarios u "
+                   + "JOIN roles r ON r.id_rol = u.id_rol WHERE r.nombre_rol <> 'cliente' ORDER BY u.id_usuario";
+        System.out.println("\n--- USUARIOS DE LA EMPRESA ---");
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                System.out.printf("%d. %s (%s)%n", rs.getInt(1), rs.getString(2), rs.getString(3));
+            }
+        }
+        int id = Utilidades.leerEntero("ID del usuario (0 = cancelar): ");
+        if (id == 0) return;
+        if (id == idUsuarioActual) {
+            System.out.println("No puedes cambiar tu propio rol");
+            return;
+        }
+        if (!Utilidades.existe(con, "SELECT 1 FROM usuarios u JOIN roles r ON r.id_rol = u.id_rol "
+                + "WHERE u.id_usuario = ? AND r.nombre_rol <> 'cliente'", id)) {
+            System.out.println("No existe ese usuario de la empresa");
+            return;
+        }
+        System.out.println("Nuevo rol: 1. crm   2. ventas   3. compras   4. inventario   5. fabricacion   6. administrador");
+        int op = Utilidades.leerEntero("Opcion: ");
+        if (op < 1 || op > 6) {
+            System.out.println("Rol no valido");
+            return;
+        }
+        String rol = (op == 6) ? "administrador" : DEPARTAMENTOS[op - 1];
+        try (PreparedStatement ps = con.prepareStatement(
+                "UPDATE usuarios SET id_rol = (SELECT id_rol FROM roles WHERE nombre_rol = ?) WHERE id_usuario = ?")) {
+            ps.setString(1, rol);
+            ps.setInt(2, id);
+            ps.executeUpdate();
+        }
+        System.out.println("Rol cambiado a " + rol);
     }
 
     private static int crearUsuario(Connection con, String nombre, String pass, String nombreRol)

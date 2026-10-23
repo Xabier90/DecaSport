@@ -13,26 +13,18 @@ public class Main {
     public static void main(String[] args) {
         try (Connection con = DriverManager.getConnection(URL, USUARIO, CONTRASENA)) {
             System.out.println("Conectado a la base de datos decasport");
-            crearTablas(con);
-            Usuarios.crearAdminPorDefecto(con);
+            prepararBaseDeDatos(con);
+            Usuarios.crearUsuariosPorDefecto(con);
+            Usuarios.corregirRolesAntiguos(con);
             menuInicial(con);
         } catch (SQLException e) {
             System.out.println("Error con la base de datos: " + e.getMessage());
         }
     }
 
-    // Crea las tablas nuevas solo si todavia no existen
-    private static void crearTablas(Connection con) throws SQLException {
+    // Crea las tablas y roles nuevos solo si todavia no existen
+    private static void prepararBaseDeDatos(Connection con) throws SQLException {
         String[] sentencias = {
-            "INSERT INTO roles (nombre_rol) SELECT 'administrador' "
-                + "WHERE NOT EXISTS (SELECT 1 FROM roles WHERE nombre_rol = 'administrador')",
-            "INSERT INTO roles (nombre_rol) SELECT 'trabajador' "
-                + "WHERE NOT EXISTS (SELECT 1 FROM roles WHERE nombre_rol = 'trabajador')",
-            "INSERT INTO roles (nombre_rol) SELECT 'comercial' "
-                + "WHERE NOT EXISTS (SELECT 1 FROM roles WHERE nombre_rol = 'comercial')",
-            "INSERT INTO roles (nombre_rol) SELECT 'cliente' "
-                + "WHERE NOT EXISTS (SELECT 1 FROM roles WHERE nombre_rol = 'cliente')",
-
             "CREATE TABLE IF NOT EXISTS componentes_fabricacion ("
                 + "id_componente SERIAL PRIMARY KEY, "
                 + "id_producto INTEGER NOT NULL REFERENCES productos(id_producto) ON DELETE CASCADE, "
@@ -54,28 +46,69 @@ public class Main {
                 + "cantidad INTEGER NOT NULL CHECK (cantidad > 0), "
                 + "id_usuario INTEGER REFERENCES usuarios(id_usuario), "
                 + "fecha DATE NOT NULL DEFAULT CURRENT_DATE, "
-                + "estado VARCHAR(20) NOT NULL DEFAULT 'Abierta')"
+                + "estado VARCHAR(20) NOT NULL DEFAULT 'Abierta')",
+
+            // La tabla antigua solo dejaba fabricar 'bici' o 'snow': asi se puede fabricar cualquier producto
+            "ALTER TABLE fabricacion DROP CONSTRAINT IF EXISTS montajes_tipo_check"
         };
         try (Statement st = con.createStatement()) {
             for (String s : sentencias) st.execute(s);
+
+            // Roles: administrador, cliente y uno por cada departamento
+            String[] roles = {"administrador", "cliente", "crm", "ventas", "compras", "inventario", "fabricacion"};
+            for (String rol : roles) {
+                st.execute("INSERT INTO roles (nombre_rol) SELECT '" + rol + "' "
+                        + "WHERE NOT EXISTS (SELECT 1 FROM roles WHERE nombre_rol = '" + rol + "')");
+            }
         }
     }
 
-    // ---------- MENU INICIAL ----------
+    // ============================================================
+    // AYUDAS PARA DIBUJAR LOS MENUS (asi todos se ven iguales)
+    // ============================================================
+    private static void titulo(String texto) {
+        System.out.println();
+        System.out.println("==================================================");
+        System.out.println("  " + texto);
+        System.out.println("==================================================");
+    }
+
+    private static void seccion(String texto) {
+        System.out.println(" " + texto);
+    }
+
+    private static void opcion(int numero, String texto) {
+        System.out.printf("   %d. %s%n", numero, texto);
+    }
+
+    private static int pedirOpcion(String textoSalir) {
+        System.out.println(" --------------------------------------------------");
+        System.out.println("   0. " + textoSalir);
+        return Utilidades.leerEntero("Elige una opcion: ");
+    }
+
+    private static String tituloDepartamento(String departamento) {
+        return "MENU " + departamento + "   (usuario: " + Usuarios.nombreActual + ")";
+    }
+
+    // El administrador vuelve a su menu; el trabajador cierra sesion
+    private static String textoSalida() {
+        return Usuarios.esAdmin() ? "Volver al menu de administrador" : "Cerrar sesion";
+    }
+
+    // ============================================================
+    // MENU INICIAL
+    // ============================================================
     private static void menuInicial(Connection con) {
         while (true) {
-            System.out.println("\n=== DECASPORT ===");
-            System.out.println("1. Iniciar sesion");
-            System.out.println("2. Registrarse como cliente");
-            System.out.println("0. Salir");
-            int op = Utilidades.leerEntero("Opcion: ");
+            titulo("DECASPORT ERP");
+            opcion(1, "Iniciar sesion");
+            opcion(2, "Registrarme como cliente");
+            int op = pedirOpcion("Salir del programa");
             try {
                 switch (op) {
                     case 1 -> {
-                        if (Usuarios.iniciarSesion(con)) {
-                            if (Usuarios.rolActual.equals("cliente")) menuCliente(con);
-                            else menuPersonal(con);
-                        }
+                        if (Usuarios.iniciarSesion(con)) abrirMenuSegunRol(con);
                     }
                     case 2 -> Usuarios.registrarCliente(con);
                     case 0 -> {
@@ -90,60 +123,48 @@ public class Main {
         }
     }
 
-    // ---------- MENU DEL PERSONAL ----------
-    private static void menuPersonal(Connection con) {
-        boolean admin = Usuarios.esAdmin();
-        boolean comercial = Usuarios.puedeCrearOportunidad();
+    // Cada usuario entra directamente en el menu de su departamento
+    private static void abrirMenuSegunRol(Connection con) {
+        switch (Usuarios.rolActual) {
+            case "administrador" -> menuAdministrador(con);
+            case "crm" -> menuCrm(con);
+            case "ventas" -> menuVentas(con);
+            case "compras" -> menuCompras(con);
+            case "inventario" -> menuInventario(con);
+            case "fabricacion" -> menuFabricacion(con);
+            case "cliente" -> menuCliente(con);
+            default -> System.out.println("Tu usuario no tiene ningun departamento asignado. "
+                    + "Pide al administrador que te asigne uno.");
+        }
+    }
+
+    // ============================================================
+    // ADMINISTRADOR: entra en cualquier departamento y gestiona usuarios
+    // ============================================================
+    private static void menuAdministrador(Connection con) {
         while (true) {
-            System.out.println("\n=== MENU " + Usuarios.rolActual.toUpperCase() + " ===");
-            System.out.println("1. Ver productos");
-            System.out.println("2. Ver clientes");
-            System.out.println("3. Ver pedidos de venta");
-            System.out.println("4. Ver facturas");
-            System.out.println("5. Ver componentes de fabricacion");
-            System.out.println("6. Ver pedidos de compra");
-            System.out.println("7. Ver ordenes de fabricacion");
-            System.out.println("8. Ver proveedores");
-            System.out.println("9. Ver oportunidades de venta");
-            if (comercial) System.out.println("10. Crear oportunidad de venta (simula toda la cadena)");
-            if (admin) {
-                System.out.println("11. Anadir producto");
-                System.out.println("12. Editar producto");
-                System.out.println("13. Borrar producto");
-                System.out.println("14. Anadir componente de fabricacion");
-                System.out.println("15. Editar componente de fabricacion");
-                System.out.println("16. Borrar componente de fabricacion");
-                System.out.println("17. Crear pedido de compra");
-                System.out.println("18. Recibir pedido de compra (suma al stock del componente)");
-                System.out.println("19. Terminar orden de fabricacion");
-                System.out.println("20. Crear usuario (trabajador, comercial o administrador)");
-                System.out.println("21. Borrar cliente");
-            }
-            System.out.println("0. Cerrar sesion");
-            int op = Utilidades.leerEntero("Opcion: ");
+            titulo("MENU ADMINISTRADOR   (usuario: " + Usuarios.nombreActual + ")");
+            seccion("DEPARTAMENTOS (entras como si fueras ese trabajador)");
+            opcion(1, "CRM");
+            opcion(2, "Ventas");
+            opcion(3, "Compras");
+            opcion(4, "Inventario");
+            opcion(5, "Fabricacion");
+            seccion("ADMINISTRACION");
+            opcion(6, "Informes (general y de cada departamento)");
+            opcion(7, "Crear un usuario");
+            opcion(8, "Cambiar el departamento de un usuario");
+            int op = pedirOpcion("Cerrar sesion");
             try {
                 switch (op) {
-                    case 1 -> Inventario.verProductos(con);
-                    case 2 -> Ventas.verClientes(con);
-                    case 3 -> Ventas.verPedidos(con);
-                    case 4 -> Ventas.verFacturas(con);
-                    case 5 -> Inventario.verComponentes(con);
-                    case 6 -> Inventario.verCompras(con);
-                    case 7 -> Inventario.verFabricacion(con);
-                    case 8 -> Inventario.verProveedores(con);
-                    case 9 -> Ventas.verOportunidades(con);
-                    case 10 -> Ventas.crearOportunidad(con);
-                    case 11 -> Inventario.anadirProducto(con);
-                    case 12 -> Inventario.editarProducto(con);
-                    case 13 -> Inventario.borrarProducto(con);
-                    case 14 -> Inventario.anadirComponente(con);
-                    case 15 -> Inventario.editarComponente(con);
-                    case 16 -> Inventario.borrarComponente(con);
-                    case 17 -> Inventario.crearCompraManual(con);
-                    case 18 -> Inventario.recibirCompraMenu(con);
-                    case 19 -> Inventario.terminarOrdenMenu(con);
-                    case 20 -> Usuarios.crearUsuarioPersonal(con);
-                    case 21 -> Ventas.borrarCliente(con);
+                    case 1 -> menuCrm(con);
+                    case 2 -> menuVentas(con);
+                    case 3 -> menuCompras(con);
+                    case 4 -> menuInventario(con);
+                    case 5 -> menuFabricacion(con);
+                    case 6 -> Informes.menuInformes(con);
+                    case 7 -> Usuarios.crearUsuarioPersonal(con);
+                    case 8 -> Usuarios.cambiarDepartamento(con);
                     case 0 -> {
                         return;
                     }
@@ -155,14 +176,179 @@ public class Main {
         }
     }
 
-    // ---------- MENU DEL CLIENTE ----------
+    // ============================================================
+    // MENUS DE CADA DEPARTAMENTO
+    // Cada trabajador solo ve las opciones de su trabajo
+    // ============================================================
+
+    // CRM: relacion con los clientes y oportunidades de venta
+    private static void menuCrm(Connection con) {
+        while (true) {
+            titulo(tituloDepartamento("CRM"));
+            seccion("CLIENTES");
+            opcion(1, "Ver clientes");
+            opcion(2, "Borrar un cliente");
+            seccion("OPORTUNIDADES DE VENTA");
+            opcion(3, "Ver oportunidades");
+            opcion(4, "Crear una oportunidad (lanza pedido, compra, fabricacion y factura)");
+            seccion("INFORMES");
+            opcion(5, "Informe de CRM");
+            int op = pedirOpcion(textoSalida());
+            try {
+                switch (op) {
+                    case 1 -> Ventas.verClientes(con);
+                    case 2 -> Ventas.borrarCliente(con);
+                    case 3 -> Ventas.verOportunidades(con);
+                    case 4 -> Ventas.crearOportunidad(con);
+                    case 5 -> Informes.informeCrm(con);
+                    case 0 -> {
+                        return;
+                    }
+                    default -> System.out.println("Opcion no valida");
+                }
+            } catch (SQLException e) {
+                System.out.println("Error en la base de datos: " + e.getMessage());
+            }
+        }
+    }
+
+    // VENTAS: pedidos de los clientes y facturas
+    private static void menuVentas(Connection con) {
+        while (true) {
+            titulo(tituloDepartamento("VENTAS"));
+            seccion("PEDIDOS DE VENTA");
+            opcion(1, "Ver pedidos de venta");
+            opcion(2, "Facturar un pedido pendiente");
+            seccion("FACTURAS");
+            opcion(3, "Ver facturas");
+            seccion("INFORMES");
+            opcion(4, "Informe de Ventas");
+            int op = pedirOpcion(textoSalida());
+            try {
+                switch (op) {
+                    case 1 -> Ventas.verPedidos(con);
+                    case 2 -> Ventas.facturarPedido(con);
+                    case 3 -> Ventas.verFacturas(con);
+                    case 4 -> Informes.informeVentas(con);
+                    case 0 -> {
+                        return;
+                    }
+                    default -> System.out.println("Opcion no valida");
+                }
+            } catch (SQLException e) {
+                System.out.println("Error en la base de datos: " + e.getMessage());
+            }
+        }
+    }
+
+    // COMPRAS: proveedores y pedidos de compra de componentes
+    private static void menuCompras(Connection con) {
+        while (true) {
+            titulo(tituloDepartamento("COMPRAS"));
+            seccion("PROVEEDORES");
+            opcion(1, "Ver proveedores");
+            seccion("PEDIDOS DE COMPRA");
+            opcion(2, "Ver componentes que hay que comprar (bajo minimo)");
+            opcion(3, "Ver pedidos de compra");
+            opcion(4, "Crear un pedido de compra");
+            opcion(5, "Registrar la llegada de un pedido (suma al stock)");
+            seccion("INFORMES");
+            opcion(6, "Informe de Compras");
+            int op = pedirOpcion(textoSalida());
+            try {
+                switch (op) {
+                    case 1 -> Inventario.verProveedores(con);
+                    case 2 -> Inventario.verComponentesAComprar(con);
+                    case 3 -> Inventario.verCompras(con);
+                    case 4 -> Inventario.crearCompraManual(con);
+                    case 5 -> Inventario.recibirCompraMenu(con);
+                    case 6 -> Informes.informeCompras(con);
+                    case 0 -> {
+                        return;
+                    }
+                    default -> System.out.println("Opcion no valida");
+                }
+            } catch (SQLException e) {
+                System.out.println("Error en la base de datos: " + e.getMessage());
+            }
+        }
+    }
+
+    // INVENTARIO: catalogo de productos, stock y componentes
+    private static void menuInventario(Connection con) {
+        while (true) {
+            titulo(tituloDepartamento("INVENTARIO"));
+            seccion("PRODUCTOS");
+            opcion(1, "Ver productos y su stock");
+            opcion(2, "Anadir un producto");
+            opcion(3, "Editar un producto");
+            opcion(4, "Borrar un producto");
+            seccion("COMPONENTES DE FABRICACION");
+            opcion(5, "Ver componentes");
+            opcion(6, "Anadir un componente");
+            opcion(7, "Editar un componente");
+            opcion(8, "Borrar un componente");
+            seccion("INFORMES");
+            opcion(9, "Informe de Inventario");
+            int op = pedirOpcion(textoSalida());
+            try {
+                switch (op) {
+                    case 1 -> Inventario.verProductos(con);
+                    case 2 -> Inventario.anadirProducto(con);
+                    case 3 -> Inventario.editarProducto(con);
+                    case 4 -> Inventario.borrarProducto(con);
+                    case 5 -> Inventario.verComponentes(con);
+                    case 6 -> Inventario.anadirComponente(con);
+                    case 7 -> Inventario.editarComponente(con);
+                    case 8 -> Inventario.borrarComponente(con);
+                    case 9 -> Informes.informeInventario(con);
+                    case 0 -> {
+                        return;
+                    }
+                    default -> System.out.println("Opcion no valida");
+                }
+            } catch (SQLException e) {
+                System.out.println("Error en la base de datos: " + e.getMessage());
+            }
+        }
+    }
+
+    // FABRICACION: ordenes de montaje en el taller
+    private static void menuFabricacion(Connection con) {
+        while (true) {
+            titulo(tituloDepartamento("FABRICACION"));
+            seccion("ORDENES DE FABRICACION");
+            opcion(1, "Ver ordenes de fabricacion");
+            opcion(2, "Terminar una orden (gasta piezas y suma el producto al stock)");
+            seccion("PIEZAS");
+            opcion(3, "Ver las piezas que lleva un producto");
+            seccion("INFORMES");
+            opcion(4, "Informe de Fabricacion");
+            int op = pedirOpcion(textoSalida());
+            try {
+                switch (op) {
+                    case 1 -> Inventario.verFabricacion(con);
+                    case 2 -> Inventario.terminarOrdenMenu(con);
+                    case 3 -> Inventario.verPiezasDeProducto(con);
+                    case 4 -> Informes.informeFabricacion(con);
+                    case 0 -> {
+                        return;
+                    }
+                    default -> System.out.println("Opcion no valida");
+                }
+            } catch (SQLException e) {
+                System.out.println("Error en la base de datos: " + e.getMessage());
+            }
+        }
+    }
+
+    // CLIENTE: catalogo y pedidos propios
     private static void menuCliente(Connection con) {
         while (true) {
-            System.out.println("\n=== MENU CLIENTE ===");
-            System.out.println("1. Ver productos");
-            System.out.println("2. Hacer un pedido");
-            System.out.println("0. Cerrar sesion");
-            int op = Utilidades.leerEntero("Opcion: ");
+            titulo("MENU CLIENTE   (usuario: " + Usuarios.nombreActual + ")");
+            opcion(1, "Ver catalogo de productos");
+            opcion(2, "Hacer un pedido");
+            int op = pedirOpcion("Cerrar sesion");
             try {
                 switch (op) {
                     case 1 -> Inventario.verProductos(con);

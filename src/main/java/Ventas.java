@@ -28,9 +28,9 @@ public class Ventas {
             if (!hay) System.out.println("No hay clientes");
         }
     }
-        // Borra un cliente con sus pedidos, facturas, oportunidades y su usuario (solo administrador)
+    // Borra un cliente con sus pedidos, facturas, oportunidades y su usuario (CRM o administrador)
     public static void borrarCliente(Connection con) throws SQLException {
-        if (!Usuarios.exigirAdmin()) return;
+        if (!Usuarios.exigir("crm")) return;
         verClientes(con);
         int id = Utilidades.leerEntero("ID del cliente a borrar (0 = cancelar): ");
         if (id == 0) return;
@@ -154,6 +154,93 @@ public class Ventas {
     }
 
     // ============================================================
+    // FACTURAR PEDIDOS (departamento de ventas)
+    // ============================================================
+    // Pedidos que se pueden facturar:
+    //  - 'pendiente'  : pedidos hechos por clientes (el stock ya se resto al hacer el pedido)
+    //  - 'Listo envio': pedidos de la cadena del CRM ya fabricados (el stock se resta al enviarlos)
+    public static void facturarPedido(Connection con) throws SQLException {
+        if (!Usuarios.exigir("ventas")) return;
+        String sql = "SELECT p.id_pedido, c.nombre, p.fecha, p.estado, "
+                   + "COALESCE(SUM(l.cantidad * pr.precio), 0) "
+                   + "FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
+                   + "LEFT JOIN lineas_pedido l ON l.id_pedido = p.id_pedido "
+                   + "LEFT JOIN productos pr ON pr.id_producto = l.id_producto "
+                   + "WHERE p.estado IN ('pendiente', 'Listo envio') "
+                   + "AND NOT EXISTS (SELECT 1 FROM facturas f WHERE f.id_pedido = p.id_pedido) "
+                   + "GROUP BY p.id_pedido, c.nombre ORDER BY p.id_pedido";
+        java.util.Map<Integer, Double> totales = new java.util.HashMap<>();
+        java.util.Map<Integer, String> estados = new java.util.HashMap<>();
+        System.out.println("\n--- PEDIDOS PENDIENTES DE FACTURAR ---");
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                totales.put(rs.getInt(1), rs.getDouble(5));
+                estados.put(rs.getInt(1), rs.getString(4));
+                System.out.printf("Pedido %d | %s | %s | %s | %.2f EUR%n",
+                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5));
+            }
+        }
+        if (totales.isEmpty()) {
+            System.out.println("No hay pedidos pendientes de facturar");
+            return;
+        }
+        int id = Utilidades.leerEntero("ID del pedido a facturar (0 = cancelar): ");
+        if (id == 0) return;
+        if (!totales.containsKey(id)) {
+            System.out.println("Ese pedido no esta en la lista");
+            return;
+        }
+        double total = totales.get(id);
+        if (!Utilidades.preguntarSiNo(String.format("Se enviara y facturara el pedido %d por %.2f EUR. Confirmar?", id, total))) {
+            System.out.println("Cancelado");
+            return;
+        }
+
+        try {
+            con.setAutoCommit(false);
+            // Los pedidos de la cadena todavia no han restado el stock: se resta al enviarlos
+            if ("Listo envio".equals(estados.get(id))) {
+                List<Linea> lineas = new ArrayList<>();
+                try (PreparedStatement ps = con.prepareStatement(
+                        "SELECT l.id_producto, p.nombre, p.precio, l.cantidad FROM lineas_pedido l "
+                        + "JOIN productos p ON p.id_producto = l.id_producto WHERE l.id_pedido = ?")) {
+                    ps.setInt(1, id);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            lineas.add(new Linea(rs.getInt(1), rs.getString(2), rs.getDouble(3), rs.getInt(4)));
+                        }
+                    }
+                }
+                for (Linea l : lineas) {
+                    if (!Inventario.descontarStockTotal(con, l.idProducto(), l.cantidad())) {
+                        con.rollback();
+                        System.out.println("No hay stock suficiente de " + l.nombre() + " para enviar el pedido");
+                        return;
+                    }
+                }
+            }
+            int idFactura;
+            try (PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO facturas (id_pedido, fecha, total) VALUES (?, CURRENT_DATE, ?) RETURNING id_factura")) {
+                ps.setInt(1, id);
+                ps.setDouble(2, total);
+                try (ResultSet rs = ps.executeQuery()) {
+                    rs.next();
+                    idFactura = rs.getInt(1);
+                }
+            }
+            cambiarEstadoPedido(con, id, "Facturado");
+            con.commit();
+            System.out.printf("Factura %d emitida por %.2f EUR. El pedido %d queda 'Facturado'%n", idFactura, total, id);
+        } catch (SQLException e) {
+            Utilidades.rollback(con);
+            System.out.println("No se ha podido facturar el pedido: " + e.getMessage());
+        } finally {
+            Utilidades.activarAutoCommit(con);
+        }
+    }
+
+    // ============================================================
     // PEDIDO DEL CLIENTE
     // ============================================================
     public static void hacerPedido(Connection con) throws SQLException {
@@ -218,7 +305,7 @@ public class Ventas {
             }
 
             for (Linea l : carrito) {
-                if (!Inventario.descontarStock(con, l.idProducto(), l.cantidad())) {
+                if (!Inventario.descontarStockTotal(con, l.idProducto(), l.cantidad())) {
                     con.rollback();
                     System.out.println("No hay stock suficiente de " + l.nombre() + ". Pedido cancelado");
                     return;
@@ -291,7 +378,7 @@ public class Ventas {
             }
         }
         if (!hay) {
-            System.out.println("No hay productos con componentes definidos. El administrador debe crearlos primero");
+            System.out.println("No hay productos con componentes definidos. Inventario debe crearlos primero");
             return;
         }
         int idProducto = Utilidades.leerEntero("ID del producto a ofrecer (0 = cancelar): ");
@@ -464,7 +551,7 @@ public class Ventas {
         // PASO 5: envio y factura
         cambiarEstadoPedido(con, idPedido, "Listo envio");
         if (!Utilidades.preguntarSiNo("[ENVIO] Confirmas el envio del pedido " + idPedido + " al cliente?")) {
-            System.out.println(">> Pedido listo para envio. Queda pendiente de enviar");
+            System.out.println(">> Pedido listo para envio. Ventas lo puede enviar y facturar despues (opcion 'Facturar un pedido pendiente')");
             return;
         }
         try {

@@ -7,8 +7,11 @@ proceso.py - PROGRAMA PADRE (proceso) de DecaSport.
 
 Lanza subproceso.py (el hijo) con Popen y se comunica con él por PIPE:
   - Popen no bloquea; stdin/stdout/stderr redirigidos con PIPE; datos con communicate().
-  - TimeoutExpired -> cancelación en 2 fases: terminate() y, si no responde, kill().
+  - TimeoutExpired -> cancelación en 2 fases: señal suave (SIGTERM en Linux, CTRL_BREAK en
+    Windows) y, si el hijo la ignora, kill().
   - SIGINT/SIGTERM -> apagado ordenado (servidor, hijos activos).
+Además, ipc_pipe.py lanza un proceso por departamento (multiprocessing) y se comunica con
+ellos por multiprocessing.Pipe (opciones 6 y 7 del menú y comando INFORME por sockets).
 
 Los productos y el stock se leen de PostgreSQL (la misma base de datos que el programa Java).
 
@@ -34,12 +37,15 @@ from typing import Sequence
 
 import psycopg2
 
+import ipc_pipe
+
 log = logging.getLogger("proceso")
 
 # ======================================================================
 # 1. CONFIGURACIÓN
 # ======================================================================
 PYTHON = sys.executable
+EN_WINDOWS = os.name == "nt"
 RUTA_HIJO = Path(__file__).resolve().with_name("subproceso.py")
 RUTA_AUDITORIA = Path(__file__).resolve().with_name("auditoria.log")
 
@@ -197,12 +203,29 @@ class ServicioHijo:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                # En Windows, grupo propio: permite mandarle CTRL_BREAK solo a este hijo
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if EN_WINDOWS else 0,
             )
         except OSError as exc:
             raise ErrorServicio(f"no se pudo lanzar '{self.nombre}': {exc}") from exc
         with self._bloqueo:
             self._activos.add(self)
         log.info("hijo '%s' lanzado con PID=%s", self.nombre, self._proc.pid)
+
+    @staticmethod
+    def _senal_suave(proc: subprocess.Popen[str]) -> None:
+        """Fase 1: pide al hijo que termine por las buenas (el hijo puede ignorarla).
+
+        Linux: terminate() = SIGTERM. Windows: terminate() mata sin avisar, así que la
+        fase 1 manda CTRL_BREAK_EVENT (SIGBREAK en el hijo); kill() queda para la fase 2.
+        """
+        if EN_WINDOWS:
+            try:
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+                return
+            except (OSError, ValueError) as exc:
+                log.debug("CTRL_BREAK no disponible (%s): se usa terminate()", exc)
+        proc.terminate()
 
     def sigue_vivo(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -237,11 +260,11 @@ class ServicioHijo:
                          (salida or "").strip(), (errores or "").strip(), cancelado, fase)
 
     def _cancelar(self, proc: subprocess.Popen[str]) -> tuple[str, str, str]:
-        """Tras un TimeoutExpired: fase 1 terminate(); si no responde, fase 2 kill()."""
+        """Tras un TimeoutExpired: fase 1 señal suave; si no responde, fase 2 kill()."""
         fase = "terminate"
-        log.warning("fase 1: terminate() a '%s' (PID=%s)", self.nombre, proc.pid)
+        log.warning("fase 1: señal de terminar a '%s' (PID=%s)", self.nombre, proc.pid)
         try:
-            proc.terminate()
+            self._senal_suave(proc)
         except OSError as exc:
             log.debug("terminate() ya no aplica: %s", exc)
         try:
@@ -273,7 +296,7 @@ class ServicioHijo:
         try:
             if proc.poll() is None:
                 try:
-                    proc.terminate()
+                    self._senal_suave(proc)
                     proc.wait(timeout=self.gracia)
                 except subprocess.TimeoutExpired:
                     log.error("'%s' (PID=%s) ignora terminate(); kill()", self.nombre, proc.pid)
@@ -340,7 +363,7 @@ def ejecutar_en_paralelo(peticiones: Sequence[tuple[str, str]]) -> list[Resultad
 # ======================================================================
 # 4. NEGOCIO
 # ======================================================================
-AYUDA = "ERROR comando no válido (STOCK id | VENDER id cantidad | CLIENTE id | SALIR)"
+AYUDA = "ERROR comando no válido (STOCK id | VENDER id cantidad | CLIENTE id | INFORME | SALIR)"
 
 
 def _motivo(r: Resultado) -> str:
@@ -405,6 +428,25 @@ class Negocio:
         auditar(f"PRUEBA_CANCELACION modo={modo} fase={r.fase_cancelacion} codigo={r.codigo}")
         return f"Cancelado en fase '{r.fase_cancelacion}' (PID={r.pid}, código de salida={r.codigo})"
 
+    def informe_paralelo(self) -> str:
+        """Un proceso por departamento, comunicados con el padre por multiprocessing.Pipe."""
+        resultados = ipc_pipe.informe_paralelo(DATOS_BD, timeout=TIMEOUT_SERVICIO,
+                                               gracia=GRACIA_TERMINATE)
+        correctos = sum(r.ok for r in resultados)
+        auditar(f"INFORME_PIPE procesos={len(resultados)} correctos={correctos}")
+        return ipc_pipe.formatear(resultados)
+
+    def probar_timeout_pipe(self) -> str:
+        """El trabajador de 'ventas' se queda bloqueado: el padre lo cancela en 2 fases."""
+        resultados = ipc_pipe.informe_paralelo(DATOS_BD, timeout=1.5, gracia=1.0,
+                                               departamentos=["inventario", "ventas"],
+                                               dormir={"ventas": 30.0})
+        for r in resultados:
+            if r.fase_cancelacion:
+                auditar(f"PRUEBA_TIMEOUT_PIPE departamento={r.departamento} "
+                        f"fase={r.fase_cancelacion} codigo={r.codigo_salida}")
+        return ipc_pipe.formatear(resultados)
+
     def despachar(self, linea: str) -> str:
         """Interpreta un comando del protocolo de sockets. Nunca lanza: devuelve siempre una línea."""
         partes = linea.split()
@@ -418,6 +460,9 @@ class Negocio:
                 return self.vender(int(args[0]), int(args[1]))
             if orden == "CLIENTE" and len(args) == 1:
                 return self.consultar_cliente(int(args[0]))
+            if orden == "INFORME" and not args:
+                # el protocolo es de una línea por respuesta
+                return self.informe_paralelo().replace("\n", " || ")
         except ValueError:
             return "ERROR los argumentos deben ser números enteros"
         except ErrorServicio as exc:
@@ -526,7 +571,7 @@ def ejecutar_cliente(host: str, puerto: int) -> int:
 
     conexion.settimeout(30)   # una venta puede tardar: 3 subprocesos
     with conexion, conexion.makefile("rw", encoding="utf-8", newline="\n") as f:
-        print("Conectado a DecaSport. Comandos: STOCK id | VENDER id cantidad | CLIENTE id | SALIR")
+        print("Conectado a DecaSport. Comandos: STOCK id | VENDER id cantidad | CLIENTE id | INFORME | SALIR")
         while True:
             try:
                 comando = input("> ").strip()
@@ -559,6 +604,8 @@ MENU = """
 3. Consultar cliente (CRM)
 4. Probar cancelación fase 1 (terminate)
 5. Probar cancelación fase 2 (kill)
+6. Informe en paralelo (un proceso por departamento + Pipe)
+7. Probar timeout con Pipe (cancelación en 2 fases)
 0. Salir"""
 
 
@@ -591,6 +638,10 @@ def ejecutar_menu(negocio: Negocio) -> None:
                 print(negocio.probar_cancelacion("lento"))
             elif opcion == "5":
                 print(negocio.probar_cancelacion("sordo"))
+            elif opcion == "6":
+                print(negocio.informe_paralelo())
+            elif opcion == "7":
+                print(negocio.probar_timeout_pipe())
             elif opcion == "0":
                 return
             else:
