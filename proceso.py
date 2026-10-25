@@ -82,10 +82,27 @@ class Inventario:
     def __init__(self) -> None:
         # RLock: una operación compuesta que ya tiene el lock puede llamar a otras.
         self.lock = threading.RLock()
+        # Datos ficticios (id -> producto). Hay uno con stock 0 para probar "sin stock".
         self._productos: dict[int, Producto] = {
+            101: Producto("Camiseta técnica running", 45, Decimal("19.95")),
             105: Producto("Zapatillas running", 20, Decimal("59.90")),
+            118: Producto("Calcetines deportivos (pack 3)", 120, Decimal("8.50")),
+            142: Producto("Bicicleta de montaña 29\"", 5, Decimal("549.00")),
+            156: Producto("Casco de ciclismo", 14, Decimal("42.90")),
+            173: Producto("Pala de pádel", 12, Decimal("79.95")),
+            189: Producto("Pelotas de pádel (bote 3)", 60, Decimal("4.95")),
+            204: Producto("Chaqueta cortavientos", 18, Decimal("54.90")),
             230: Producto("Balón de fútbol", 35, Decimal("24.50")),
+            245: Producto("Botas de fútbol", 0, Decimal("69.90")),
+            262: Producto("Guantes de portero", 9, Decimal("29.90")),
+            281: Producto("Tabla de snowboard", 4, Decimal("299.00")),
             317: Producto("Mochila trekking", 8, Decimal("89.00")),
+            334: Producto("Bastones de trekking (par)", 22, Decimal("34.50")),
+            351: Producto("Saco de dormir", 11, Decimal("64.90")),
+            368: Producto("Botella térmica 750 ml", 75, Decimal("17.90")),
+            385: Producto("Esterilla de yoga", 30, Decimal("15.90")),
+            402: Producto("Mancuernas 5 kg (par)", 16, Decimal("22.50")),
+            419: Producto("Gafas de natación", 40, Decimal("12.95")),
         }
 
     def obtener(self, id_prod: int) -> Producto | None:
