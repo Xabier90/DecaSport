@@ -30,10 +30,20 @@ DURACION_SIMULADA = 30.0
 
 IVA = Decimal("0.21")
 CENTIMO = Decimal("0.01")
+# Datos ficticios (id_cliente -> (nombre, ciudad)); en el proyecto real vendrían de PostgreSQL.
 CLIENTES = {
     1: ("Ane Etxeberria", "Donostia"),
     2: ("Jon Garmendia", "Irun"),
     3: ("Claire Dubois", "Biarritz"),
+    4: ("Iker Zubeldia", "Tolosa"),
+    5: ("Maite Aranburu", "Hernani"),
+    6: ("Unai Goikoetxea", "Bilbao"),
+    7: ("Leire Mendizabal", "Vitoria-Gasteiz"),
+    8: ("Mikel Odriozola", "Pamplona"),
+    9: ("Amaia Lasa", "Zarautz"),
+    10: ("Pierre Lacroix", "Bayonne"),
+    11: ("Nerea Iturralde", "Hondarribia"),
+    12: ("Julen Arrieta", "Eibar"),
 }
 
 
