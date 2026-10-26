@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DecaSport</string>
+    <string name="empresa">DecaSport</string>
+    <string name="slogan">Benetako kirolarientzat</string>
+    <string name="salida_app">Aplikaziotik irten</string>
+    <string name="mensaje_bienvenida_form_bici">Ongi etorri bizikleta pertsonalizatuak erosteko formulariora</string>
+    <string name="formulario">Formularioa</string>
+    <string name="tipo_bici">Bizikleta mota:</string>
+    <string name="bici_carretera">Errepideko bizikleta</string>
+    <string name="bici_monte">Mendiko bizikleta</string>
+    <string name="bici_urbana">Hiri bizikleta</string>
+    <string name="bici_paseo">Aisialdirako bizikleta</string>
+    <string name="tipo_rueda">Aukeratu gurpilak \"llanta\"-ren zabaleraren arabera</string>
+    <string name="perfil_medio">Tarteko profila (30mm  eta 50mm bitartekoak)</string>
+    <string name="perfil_alto">Profil handikoa (50mm-tik gorakoak)</string>
+    <string name="perfil_bajo">Profil baxukoa (30mm-tik beherakoak)</string>
+    <string name="manillar_recto">eskuleku zuzena</string>
+    <string name="manillar_ondulado">uhindutako eskulekua</string>
+    <string name="manillar_carretera">errepiderako eskulekua</string>
+    <string name="manillar_cuernos">eskuleku adarrekin</string>
+    <string name="tipo_manillar">Hautatu behar duzun eskulekua</string>
+    <string name="marca_bici">Marka</string>
+    <string name="enviar">Bidali</string>
+    <string name="iniciar_sesion">Saioa hasi</string>
+    <string name="crear_cuenta">Sortu kontua</string>
+    <string name="mensaje_bienvenida_form_snow">Ongi etorri snowboard taula pertsonalizatuak erosteko formulariora</string>
+    <string name="talla_pie">Shoe size:</string>
+    <string name="descripcion">Nahi den diseinuaren deskribapena:</string>
+    <string name="breve_descripcion">Elurrez estalitako mendien irudi bat izatea nahiko nuke.</string>
+    <string name="longitud_tabla">" Taularen luzera (oro har, zure altuera, sudurreraino neurtuta Zentimetrotan)"</string>
+    <string name="formulario_enviado">Inprimakia behar bezala bidali da</string>
+    <string name="contador_formulario_enviado">Aurkeztutako bizikleta-formulario kopurua: %1$d || snow: %2$d</string>
+</resources>

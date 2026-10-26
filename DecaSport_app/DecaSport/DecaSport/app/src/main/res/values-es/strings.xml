@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DecaSport</string>
+    <string name="empresa">DecaSport</string>
+    <string name="slogan">Para deportistas de verdad</string>
+    <string name="salida_app">Salir de la aplicación</string>
+    <string name="mensaje_bienvenida_form_bici">Bienvenidos al formulario para comprar una bici personalizada</string>
+    <string name="formulario">Formulario</string>
+    <string name="tipo_bici">Tipo de bici:</string>
+    <string name="bici_carretera">Bici de carretera</string>
+    <string name="bici_monte">Bici de montaña</string>
+    <string name="bici_urbana">Bici urbana</string>
+    <string name="bici_paseo">Bici de paseo</string>
+    <string name="tipo_rueda">Escoge las ruedas según el ancho del perfil de la llanta:</string>
+    <string name="perfil_medio">Perfil medio (Entre 30 mm y 50 mm)</string>
+    <string name="perfil_alto">Perfil alto (Mayor a 50 mm)</string>
+    <string name="perfil_bajo">Perfil bajo (Menor a 30 mm)</string>
+    <string name="manillar_recto">Manillar recto</string>
+    <string name="manillar_ondulado">Manillar ondulado</string>
+    <string name="manillar_carretera">Manillar de carretera</string>
+    <string name="manillar_cuernos">Manillar con cuernos</string>
+    <string name="tipo_manillar">Escoge el manillar que deseas:</string>
+    <string name="marca_bici">Marca</string>
+    <string name="enviar">Enviar</string>
+    <string name="iniciar_sesion">Iniciar sesión</string>
+    <string name="crear_cuenta">Crear cuenta</string>
+    <string name="mensaje_bienvenida_form_snow">Bienvenido al formulario para comprar una tabla de snowboard personalizada</string>
+    <string name="talla_pie">Talla de pie:</string>
+    <string name="descripcion">Descripcion del diseño deseado:</string>
+    <string name="breve_descripcion">Me gustaria que tuviera la imagen de unas montañas nevadas.</string>
+    <string name="longitud_tabla">Longitud de la tabla (Suele ser tu altura hasta la nariz en centímetros)</string>
+    <string name="formulario_enviado">Formulario enviado correctamente</string>
+    <string name="contador_formulario_enviado">Cantidad de formularios de bicis enviados: %1$d || snow: %2$d</string>
+</resources>
