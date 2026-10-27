@@ -20,6 +20,10 @@ public class Usuarios {
         return "administrador".equals(rolActual);
     }
 
+    public static boolean esCliente() {
+        return "cliente".equals(rolActual);
+    }
+
     // El administrador puede entrar en todo; el resto solo en su departamento
     public static boolean tieneAcceso(String departamento) {
         return esAdmin() || departamento.equals(rolActual);

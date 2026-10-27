@@ -12,25 +12,45 @@ public class Inventario {
     // Un componente de fabricacion (fila de componentes_fabricacion)
     public record Comp(int id, String nombre, int necesaria, int stock, Integer idProveedor) {}
 
+    // Estado de un pedido de cliente que espera a que llegue stock
+    public static final String ESPERANDO = "Esperando stock";
+
+    // Subconsultas para un producto 'p': stock total y unidades que esperan los pedidos de clientes
+    private static final String STOCK_DE_P =
+            "COALESCE((SELECT SUM(s.cantidad) FROM stock s WHERE s.id_producto = p.id_producto), 0)";
+    private static final String RESERVADO_DE_P =
+            "COALESCE((SELECT SUM(l.cantidad) FROM lineas_pedido l JOIN pedidos pe ON pe.id_pedido = l.id_pedido "
+            + "WHERE pe.estado = '" + ESPERANDO + "' AND l.id_producto = p.id_producto), 0)";
+
     // ============================================================
     // VER DATOS
     // ============================================================
     public static void verProductos(Connection con) throws SQLException {
         String sql = "SELECT p.id_producto, p.nombre, p.categoria, p.precio, "
-                   + "COALESCE(SUM(s.cantidad), 0) AS stock "
-                   + "FROM productos p LEFT JOIN stock s ON s.id_producto = p.id_producto "
-                   + "GROUP BY p.id_producto ORDER BY p.id_producto";
+                   + STOCK_DE_P + ", " + RESERVADO_DE_P + " FROM productos p ORDER BY p.id_producto";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             System.out.println("\n--- PRODUCTOS ---");
             boolean hay = false;
             while (rs.next()) {
                 hay = true;
-                System.out.printf("%d. %s (%s) - %.2f EUR - stock: %d%n",
-                        rs.getInt("id_producto"), rs.getString("nombre"),
-                        rs.getString("categoria"), rs.getDouble("precio"), rs.getInt("stock"));
+                int stock = rs.getInt(5);
+                int reservado = rs.getInt(6);
+                String estado;
+                if (stock == 0 && reservado == 0) estado = "AGOTADO (se puede reservar)";
+                else if (reservado > 0) estado = "stock: " + stock + " | reservadas para pedidos en espera: " + reservado;
+                else estado = "stock: " + stock;
+                System.out.printf("%d. %s (%s) - %.2f EUR - %s%n",
+                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getDouble(4), estado);
             }
             if (!hay) System.out.println("No hay productos");
         }
+    }
+
+    // Unidades de un producto que esperan los pedidos de clientes sin stock
+    public static int reservado(Connection con, int idProducto) throws SQLException {
+        return Utilidades.buscarId(con, "SELECT COALESCE(SUM(l.cantidad), 0) FROM lineas_pedido l "
+                + "JOIN pedidos pe ON pe.id_pedido = l.id_pedido "
+                + "WHERE pe.estado = '" + ESPERANDO + "' AND l.id_producto = ?", idProducto);
     }
 
     public static void verComponentes(Connection con) throws SQLException {
@@ -58,13 +78,22 @@ public class Inventario {
     }
 
     public static void verCompras(Connection con) throws SQLException {
-        String sql = "SELECT c.id_compra, COALESCE(pv.nombre, '-'), COALESCE(cf.nombre, p.nombre, '-'), "
+        listarCompras(con, false);
+    }
+
+    // Lista los pedidos de compra. Con soloAbiertas=true, solo los que todavia no han llegado
+    private static boolean listarCompras(Connection con, boolean soloAbiertas) throws SQLException {
+        String sql = "SELECT c.id_compra, COALESCE(pv.nombre, '-'), "
+                   + "CASE WHEN c.id_componente IS NULL THEN 'producto: ' || p.nombre "
+                   + "ELSE 'pieza: ' || cf.nombre || ' (para ' || p.nombre || ')' END, "
                    + "c.cantidad, c.fecha, COALESCE(c.estado, '-') "
                    + "FROM compras c LEFT JOIN proveedores pv ON pv.id_proveedor = c.id_proveedor "
                    + "LEFT JOIN componentes_fabricacion cf ON cf.id_componente = c.id_componente "
-                   + "LEFT JOIN productos p ON p.id_producto = c.id_producto ORDER BY c.id_compra";
+                   + "LEFT JOIN productos p ON p.id_producto = c.id_producto "
+                   + (soloAbiertas ? "WHERE c.estado IN ('Pendiente', 'Aceptada') " : "")
+                   + "ORDER BY c.id_compra";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            System.out.println("\n--- PEDIDOS DE COMPRA ---");
+            System.out.println(soloAbiertas ? "\n--- PEDIDOS DE COMPRA EN CAMINO ---" : "\n--- PEDIDOS DE COMPRA ---");
             boolean hay = false;
             while (rs.next()) {
                 hay = true;
@@ -72,67 +101,141 @@ public class Inventario {
                         rs.getInt(1), rs.getString(2), rs.getInt(4), rs.getString(3),
                         rs.getString(5), rs.getString(6));
             }
-            if (!hay) System.out.println("No hay pedidos de compra");
+            if (!hay) System.out.println(soloAbiertas ? "No hay pedidos de compra en camino" : "No hay pedidos de compra");
+            return hay;
         }
     }
 
     public static void verFabricacion(Connection con) throws SQLException {
-        String sql = "SELECT f.id_montaje, f.id_pedido, COALESCE(p.nombre, '-'), COALESCE(f.tipo, '-'), "
+        listarOrdenes(con, false);
+    }
+
+    // Con soloAbiertas=true solo salen las ordenes que estan sin terminar
+    private static boolean listarOrdenes(Connection con, boolean soloAbiertas) throws SQLException {
+        String sql = "SELECT f.id_montaje, f.id_pedido, COALESCE(p.nombre, '-'), f.cantidad, "
                    + "COALESCE(u.nombre_usuario, '-'), f.fecha, COALESCE(f.estado, '-') "
                    + "FROM fabricacion f LEFT JOIN productos p ON p.id_producto = f.id_producto "
-                   + "LEFT JOIN usuarios u ON u.id_usuario = f.id_usuario ORDER BY f.id_montaje";
+                   + "LEFT JOIN usuarios u ON u.id_usuario = f.id_usuario "
+                   + (soloAbiertas ? "WHERE f.estado NOT IN ('Terminada', 'Cancelada') " : "")
+                   + "ORDER BY f.id_montaje";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            System.out.println("\n--- ORDENES DE FABRICACION ---");
+            System.out.println(soloAbiertas ? "\n--- ORDENES DE FABRICACION SIN TERMINAR ---" : "\n--- ORDENES DE FABRICACION ---");
             boolean hay = false;
             while (rs.next()) {
                 hay = true;
-                String pedido = rs.getString(2) == null ? "-" : rs.getString(2);
-                System.out.printf("Orden %d | pedido %s | %s (%s) | %s | %s | %s%n",
-                        rs.getInt(1), pedido, rs.getString(3), rs.getString(4),
+                String destino = rs.getString(2) == null ? "para stock" : "para el pedido " + rs.getString(2);
+                System.out.printf("Orden %d | %d x %s | %s | creada por %s | %s | %s%n",
+                        rs.getInt(1), rs.getInt(4), rs.getString(3), destino,
                         rs.getString(5), rs.getString(6), rs.getString(7));
             }
-            if (!hay) System.out.println("No hay ordenes de fabricacion");
+            if (!hay) System.out.println(soloAbiertas ? "No hay ordenes sin terminar" : "No hay ordenes de fabricacion");
+            return hay;
         }
     }
 
-    // COMPRAS: solo los componentes por debajo del stock minimo
-    public static void verComponentesAComprar(Connection con) throws SQLException {
+    // Productos que tienen piezas definidas, con su stock y cuantas unidades se pueden montar ya
+    private static boolean listarProductosFabricables(Connection con) throws SQLException {
+        String sql = "SELECT p.id_producto, p.nombre, " + STOCK_DE_P + ", "
+                   + "MIN(cf.stock_actual / cf.cantidad_necesaria), " + RESERVADO_DE_P + " "
+                   + "FROM productos p JOIN componentes_fabricacion cf ON cf.id_producto = p.id_producto "
+                   + "GROUP BY p.id_producto, p.nombre ORDER BY p.id_producto";
+        System.out.println("\n--- PRODUCTOS QUE SE FABRICAN ---");
+        boolean hay = false;
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            while (rs.next()) {
+                hay = true;
+                int faltan = rs.getInt(5) - rs.getInt(3);
+                System.out.printf("%d. %s | en stock: %d | se pueden montar ya: %d%s%n",
+                        rs.getInt(1), rs.getString(2), rs.getInt(3), rs.getInt(4),
+                        faltan > 0 ? " | FALTAN " + faltan + " para pedidos de clientes en espera" : "");
+            }
+        }
+        if (!hay) System.out.println("Ningun producto tiene piezas definidas (las define Inventario en 'Anadir un componente')");
+        return hay;
+    }
+
+    // COMPRAS: productos que hay que pedir (agotados o que faltan para pedidos de clientes)
+    // y piezas por debajo del minimo
+    public static void verLoQueHayQueComprar(Connection con) throws SQLException {
+        boolean hayProductos = false;
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(SQL_PRODUCTOS_A_PEDIR)) {
+            System.out.println("\n--- PRODUCTOS QUE HAY QUE PEDIR AL PROVEEDOR ---");
+            while (rs.next()) {
+                hayProductos = true;
+                System.out.printf("%d. %s | stock: %d | %s | proveedor: %s%s%n",
+                        rs.getInt(1), rs.getString(2), rs.getInt(5), motivo(rs.getInt(5), rs.getInt(6)),
+                        rs.getString(3), rs.getInt(4) > 0 ? " | ya hay un pedido de compra en camino" : "");
+            }
+            if (!hayProductos) System.out.println("No hay productos que pedir");
+        }
+
         String sql = "SELECT cf.id_componente, p.nombre, cf.nombre, cf.stock_actual, cf.stock_minimo, "
                    + "cf.stock_minimo - cf.stock_actual, COALESCE(pv.nombre, '(sin proveedor)') "
                    + "FROM componentes_fabricacion cf "
                    + "JOIN productos p ON p.id_producto = cf.id_producto "
                    + "LEFT JOIN proveedores pv ON pv.id_proveedor = cf.id_proveedor "
                    + "WHERE cf.stock_actual < cf.stock_minimo ORDER BY 6 DESC";
+        boolean hayPiezas = false;
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            System.out.println("\n--- COMPONENTES QUE HAY QUE COMPRAR ---");
-            boolean hay = false;
+            System.out.println("\n--- PIEZAS DE FABRICACION BAJO MINIMO ---");
             while (rs.next()) {
-                hay = true;
+                hayPiezas = true;
                 System.out.printf("%d. [%s] %s | stock: %d | minimo: %d | faltan: %d | proveedor: %s%n",
                         rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4),
                         rs.getInt(5), rs.getInt(6), rs.getString(7));
             }
-            if (!hay) System.out.println("No hay que comprar nada: todo esta por encima del minimo");
+            if (!hayPiezas) System.out.println("Todas las piezas estan por encima del minimo");
+        }
+
+        if ((hayProductos || hayPiezas) && Utilidades.preguntarSiNo("\nQuieres hacer un pedido de compra ahora?")) {
+            crearCompraManual(con);
+        }
+    }
+
+    // Productos que no se fabrican y estan agotados o no llegan para los pedidos en espera.
+    // Columnas: id, nombre, proveedor, compras en camino, stock, reservado
+    private static final String SQL_PRODUCTOS_A_PEDIR =
+            "SELECT * FROM (SELECT p.id_producto, p.nombre, COALESCE(pv.nombre, '(sin proveedor)'), "
+            + "(SELECT COUNT(*) FROM compras c WHERE c.id_producto = p.id_producto "
+            + "AND c.id_componente IS NULL AND c.estado IN ('Pendiente', 'Aceptada')) AS en_camino, "
+            + STOCK_DE_P + " AS stock, " + RESERVADO_DE_P + " AS reservado "
+            + "FROM productos p LEFT JOIN proveedores pv ON pv.id_proveedor = p.id_proveedor "
+            + "WHERE NOT EXISTS (SELECT 1 FROM componentes_fabricacion cf WHERE cf.id_producto = p.id_producto)) t "
+            + "WHERE stock = 0 OR reservado > stock ORDER BY id_producto";
+
+    private static String motivo(int stock, int reservado) {
+        if (reservado > stock) {
+            return "FALTAN " + (reservado - stock) + " para pedidos de clientes en espera";
+        }
+        return "AGOTADO";
+    }
+
+    // Al entrar en Compras: avisa de lo que falta y no tiene pedido en camino, y pregunta si se pide
+    public static void avisarAgotados(Connection con) throws SQLException {
+        List<int[]> aPedir = new ArrayList<>();   // {id, unidades que faltan para pedidos}
+        List<String> nombres = new ArrayList<>();
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(SQL_PRODUCTOS_A_PEDIR)) {
+            while (rs.next()) {
+                if (rs.getInt(4) == 0) {
+                    aPedir.add(new int[]{rs.getInt(1), Math.max(0, rs.getInt(6) - rs.getInt(5))});
+                    nombres.add(rs.getString(2) + " -> " + motivo(rs.getInt(5), rs.getInt(6)));
+                }
+            }
+        }
+        if (aPedir.isEmpty()) return;
+        System.out.println("\n!! AVISO: hay " + aPedir.size() + " producto(s) que hay que pedir al proveedor:");
+        for (String n : nombres) System.out.println("   - " + n);
+        if (!Utilidades.preguntarSiNo("Quieres pedirlos ahora?")) return;
+        for (int i = 0; i < aPedir.size(); i++) {
+            if (Utilidades.preguntarSiNo("Pedir '" + nombres.get(i) + "'?")) {
+                pedirAlProveedor(con, aPedir.get(i)[0], aPedir.get(i)[1]);
+            }
         }
     }
 
     // FABRICACION: piezas que lleva un producto y cuantas unidades se pueden montar
     public static void verPiezasDeProducto(Connection con) throws SQLException {
-        String sqlProductos = "SELECT DISTINCT p.id_producto, p.nombre FROM productos p "
-                            + "JOIN componentes_fabricacion cf ON cf.id_producto = p.id_producto "
-                            + "ORDER BY p.id_producto";
-        boolean hay = false;
-        System.out.println("\n--- PRODUCTOS QUE SE FABRICAN ---");
-        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sqlProductos)) {
-            while (rs.next()) {
-                hay = true;
-                System.out.printf("%d. %s%n", rs.getInt(1), rs.getString(2));
-            }
-        }
-        if (!hay) {
-            System.out.println("Ningun producto tiene piezas definidas (las define Inventario)");
-            return;
-        }
+        if (!listarProductosFabricables(con)) return;
         int idProducto = Utilidades.leerEntero("ID del producto (0 = cancelar): ");
         if (idProducto == 0) return;
         List<Comp> piezas = cargarComponentes(con, idProducto, false);
@@ -182,15 +285,24 @@ public class Inventario {
             System.out.println("Datos no validos: nombre obligatorio, precio mayor que 0 y cantidad no negativa");
             return;
         }
+        verProveedores(con);
+        int idProveedor = Utilidades.leerEntero("ID del proveedor que nos lo vende (0 = ninguno, lo fabricamos): ");
+        if (idProveedor != 0 && !Utilidades.existe(con, "SELECT 1 FROM proveedores WHERE id_proveedor = ?", idProveedor)) {
+            System.out.println("No existe ese proveedor");
+            return;
+        }
 
         try {
             con.setAutoCommit(false);
             int idProducto;
             try (PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO productos (nombre, categoria, precio) VALUES (?, ?, ?) RETURNING id_producto")) {
+                    "INSERT INTO productos (nombre, categoria, precio, id_proveedor) VALUES (?, ?, ?, ?) "
+                    + "RETURNING id_producto")) {
                 ps.setString(1, nombre);
                 ps.setString(2, categoria);
                 ps.setDouble(3, precio);
+                if (idProveedor == 0) ps.setNull(4, Types.INTEGER);
+                else ps.setInt(4, idProveedor);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     idProducto = rs.getInt(1);
@@ -223,8 +335,9 @@ public class Inventario {
         String nombreActual;
         String categoriaActual;
         double precioActual;
+        int proveedorActual;
         try (PreparedStatement ps = con.prepareStatement(
-                "SELECT nombre, categoria, precio FROM productos WHERE id_producto = ?")) {
+                "SELECT nombre, categoria, precio, id_proveedor FROM productos WHERE id_producto = ?")) {
             ps.setInt(1, id);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
@@ -234,6 +347,7 @@ public class Inventario {
                 nombreActual = rs.getString(1);
                 categoriaActual = rs.getString(2);
                 precioActual = rs.getDouble(3);
+                proveedorActual = rs.getInt(4);
             }
         }
 
@@ -261,13 +375,20 @@ public class Inventario {
             System.out.println("El precio debe ser mayor que 0. No se ha cambiado nada");
             return;
         }
+        int idProveedor = Utilidades.leerEnteroOpcional("ID proveedor (0 = ninguno)", proveedorActual, 0);
+        if (idProveedor != 0 && !Utilidades.existe(con, "SELECT 1 FROM proveedores WHERE id_proveedor = ?", idProveedor)) {
+            System.out.println("No existe ese proveedor. No se ha cambiado nada");
+            return;
+        }
 
         try (PreparedStatement ps = con.prepareStatement(
-                "UPDATE productos SET nombre = ?, categoria = ?, precio = ? WHERE id_producto = ?")) {
+                "UPDATE productos SET nombre = ?, categoria = ?, precio = ?, id_proveedor = ? WHERE id_producto = ?")) {
             ps.setString(1, nombre);
             ps.setString(2, categoria);
             ps.setDouble(3, precio);
-            ps.setInt(4, id);
+            if (idProveedor == 0) ps.setNull(4, Types.INTEGER);
+            else ps.setInt(4, idProveedor);
+            ps.setInt(5, id);
             ps.executeUpdate();
             System.out.println("Producto actualizado");
         }
@@ -448,20 +569,106 @@ public class Inventario {
     // ============================================================
     public static void crearCompraManual(Connection con) throws SQLException {
         if (!Usuarios.exigir("compras")) return;
-        verComponentes(con);
-        int id = Utilidades.leerEntero("ID del componente a comprar (0 = cancelar): ");
-        if (id == 0) return;
-        int cantidad = Utilidades.leerEntero("Cantidad a comprar: ");
-        if (cantidad <= 0) {
-            System.out.println("La cantidad debe ser mayor que 0");
-            return;
+        System.out.println("Que quieres comprar?   1. Un producto terminado   2. Una pieza de fabricacion");
+        int tipo = Utilidades.leerEntero("Opcion (0 = cancelar): ");
+        if (tipo == 1) {
+            verProductos(con);
+            int id = Utilidades.leerEntero("ID del producto a comprar (0 = cancelar): ");
+            if (id == 0) return;
+            if (!Utilidades.existe(con, "SELECT 1 FROM productos WHERE id_producto = ?", id)) {
+                System.out.println("No existe ese producto");
+                return;
+            }
+            pedirAlProveedor(con, id, Math.max(0, reservado(con, id) - stockTotal(con, id)));
+        } else if (tipo == 2) {
+            verComponentes(con);
+            int id = Utilidades.leerEntero("ID de la pieza a comprar (0 = cancelar): ");
+            if (id == 0) return;
+            int cantidad = leerCantidadCompra(0);
+            if (cantidad <= 0) return;
+            int idCompra = crearCompraComponente(con, id, cantidad);
+            if (idCompra < 0) return;
+            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado (estado: Pendiente)");
+            if (tramitarCompra(con, idCompra)) System.out.println("[INVENTARIO] Stock de la pieza actualizado");
+        } else if (tipo != 0) {
+            System.out.println("Opcion no valida");
         }
-        int idCompra = crearCompra(con, id, cantidad);
-        if (idCompra > 0) System.out.println("Pedido de compra " + idCompra + " creado (estado: Pendiente)");
+    }
+
+    // Si 'sugerida' > 0 (lo que falta para pedidos de clientes), pulsar Enter la acepta
+    private static int leerCantidadCompra(int sugerida) {
+        int cantidad = sugerida > 0
+                ? Utilidades.leerEnteroOpcional("Cuantas unidades pides? (faltan " + sugerida
+                        + " para pedidos de clientes, Enter = " + sugerida + ")", sugerida, 0)
+                : Utilidades.leerEntero("Cuantas unidades pides? ");
+        if (cantidad <= 0) System.out.println("La cantidad debe ser mayor que 0");
+        return cantidad;
+    }
+
+    // Pregunta cuantas unidades de un producto terminado se piden, crea la compra y la tramita
+    private static void pedirAlProveedor(Connection con, int idProducto, int sugerida) throws SQLException {
+        int cantidad = leerCantidadCompra(sugerida);
+        if (cantidad <= 0) return;
+        int idCompra = crearCompraProducto(con, idProducto, cantidad);
+        if (idCompra < 0) return;
+        System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado (estado: Pendiente)");
+        if (tramitarCompra(con, idCompra)) {
+            System.out.println("[INVENTARIO] Stock actualizado: ahora hay " + stockTotal(con, idProducto) + " unidad(es)");
+            Ventas.procesarPedidosEnEspera(con);
+        }
+    }
+
+    // Crea el pedido de compra de un producto terminado a su proveedor. Devuelve su ID o -1 si no se pudo.
+    public static int crearCompraProducto(Connection con, int idProducto, int cantidad) throws SQLException {
+        int idProveedor = proveedorDeProducto(con, idProducto);
+        if (idProveedor < 0) return -1;
+        try (PreparedStatement ps = con.prepareStatement(
+                "INSERT INTO compras (id_proveedor, id_producto, cantidad, fecha, estado) "
+                + "VALUES (?, ?, ?, CURRENT_DATE, 'Pendiente') RETURNING id_compra")) {
+            ps.setInt(1, idProveedor);
+            ps.setInt(2, idProducto);
+            ps.setInt(3, cantidad);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        }
+    }
+
+    // Proveedor que nos vende el producto. Si no tiene, se pide y se guarda. -1 si se cancela
+    public static int proveedorDeProducto(Connection con, int idProducto) throws SQLException {
+        try (PreparedStatement ps = con.prepareStatement(
+                "SELECT id_proveedor, nombre FROM productos WHERE id_producto = ?")) {
+            ps.setInt(1, idProducto);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    System.out.println("No existe ese producto");
+                    return -1;
+                }
+                int id = rs.getInt(1);
+                if (!rs.wasNull()) return id;
+                System.out.println("El producto '" + rs.getString(2) + "' no tiene proveedor asignado");
+            }
+        }
+        verProveedores(con);
+        int idProveedor = Utilidades.leerEntero("ID del proveedor que lo vende (0 = cancelar): ");
+        if (idProveedor == 0) return -1;
+        if (!Utilidades.existe(con, "SELECT 1 FROM proveedores WHERE id_proveedor = ?", idProveedor)) {
+            System.out.println("No existe ese proveedor");
+            return -1;
+        }
+        try (PreparedStatement ps = con.prepareStatement(
+                "UPDATE productos SET id_proveedor = ? WHERE id_producto = ?")) {
+            ps.setInt(1, idProveedor);
+            ps.setInt(2, idProducto);
+            ps.executeUpdate();
+        }
+        System.out.println("Proveedor guardado en el producto para las proximas compras");
+        return idProveedor;
     }
 
     // Crea el pedido de compra de un componente. Devuelve su ID o -1 si no se pudo.
-    public static int crearCompra(Connection con, int idComponente, int cantidad) throws SQLException {
+    public static int crearCompraComponente(Connection con, int idComponente, int cantidad) throws SQLException {
         try (PreparedStatement ps = con.prepareStatement(
                 "SELECT id_producto, id_proveedor, nombre FROM componentes_fabricacion WHERE id_componente = ?")) {
             ps.setInt(1, idComponente);
@@ -494,13 +701,108 @@ public class Inventario {
 
     public static void recibirCompraMenu(Connection con) throws SQLException {
         if (!Usuarios.exigir("compras")) return;
-        verCompras(con);
+        if (!listarCompras(con, true)) return;
         int id = Utilidades.leerEntero("ID del pedido de compra recibido (0 = cancelar): ");
         if (id == 0) return;
-        if (recibirCompra(con, id)) System.out.println("Material recibido: stock del componente actualizado");
+        if (recibirCompra(con, id)) {
+            System.out.println("Material recibido: stock actualizado");
+            Ventas.procesarPedidosEnEspera(con);
+        }
     }
 
-    // Marca la compra como recibida y suma las unidades al stock del componente
+    // ============================================================
+    // CONSEGUIR MATERIAL DEL PROVEEDOR (lo usan Compras y la cadena del CRM)
+    // ============================================================
+
+    // El proveedor acepta? Ha llegado? Devuelve true si el material ya esta en el almacen
+    public static boolean tramitarCompra(Connection con, int idCompra) throws SQLException {
+        String estado = null;
+        try (PreparedStatement ps = con.prepareStatement("SELECT estado FROM compras WHERE id_compra = ?")) {
+            ps.setInt(1, idCompra);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) estado = rs.getString(1);
+            }
+        }
+        if ("Pendiente".equals(estado)) {
+            if (!Utilidades.preguntarSiNo("   El proveedor ACEPTA el pedido de compra " + idCompra + "?")) {
+                actualizarEstadoCompra(con, idCompra, "Rechazada");
+                System.out.println("[COMPRAS] El proveedor rechaza el pedido de compra " + idCompra);
+                return false;
+            }
+            actualizarEstadoCompra(con, idCompra, "Aceptada");
+        }
+        if (!Utilidades.preguntarSiNo("   Ha LLEGADO ya el material del pedido de compra " + idCompra + "?")) {
+            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " en camino. Cuando llegue, "
+                    + "registralo en Compras > 'Registrar la llegada de un pedido'");
+            return false;
+        }
+        return recibirCompra(con, idCompra);
+    }
+
+    // Consigue 'cantidad' unidades de un producto que compramos hecho.
+    // Si ya hay un pedido de compra en camino se usa ese. True si el material ya esta en el almacen
+    public static boolean reponerProducto(Connection con, int idProducto, int cantidad) throws SQLException {
+        int idCompra = Utilidades.buscarId(con, "SELECT id_compra FROM compras WHERE id_producto = ? "
+                + "AND id_componente IS NULL AND estado IN ('Pendiente', 'Aceptada') ORDER BY id_compra LIMIT 1", idProducto);
+        if (idCompra > 0) {
+            System.out.println("[COMPRAS] Ya hay un pedido de compra en camino para este producto: " + idCompra);
+        } else {
+            idCompra = crearCompraProducto(con, idProducto, cantidad);
+            if (idCompra < 0) return false;
+            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado: " + cantidad + " unidad(es)");
+        }
+        return tramitarCompra(con, idCompra);
+    }
+
+    // Lo mismo para una pieza de fabricacion
+    public static boolean reponerComponente(Connection con, Comp c, int cantidad) throws SQLException {
+        int idCompra = Utilidades.buscarId(con, "SELECT id_compra FROM compras WHERE id_componente = ? "
+                + "AND estado IN ('Pendiente', 'Aceptada') ORDER BY id_compra LIMIT 1", c.id());
+        if (idCompra > 0) {
+            System.out.println("[COMPRAS] Ya hay un pedido de compra en camino para " + c.nombre() + ": " + idCompra);
+        } else {
+            idCompra = crearCompraComponente(con, c.id(), cantidad);
+            if (idCompra < 0) return false;
+            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado: " + cantidad + " x " + c.nombre());
+        }
+        return tramitarCompra(con, idCompra);
+    }
+
+    // Despues de vender: si un producto que compramos hecho se ha quedado sin stock,
+    // pregunta si se pide mas al proveedor
+    public static void comprobarAgotado(Connection con, int idProducto) throws SQLException {
+        if (Usuarios.esCliente() || stockTotal(con, idProducto) > 0 || seFabrica(con, idProducto)) return;
+        String nombre = "";
+        try (PreparedStatement ps = con.prepareStatement("SELECT nombre FROM productos WHERE id_producto = ?")) {
+            ps.setInt(1, idProducto);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) nombre = rs.getString(1);
+            }
+        }
+        System.out.println("\n[INVENTARIO] '" + nombre + "' se ha quedado SIN STOCK");
+        int enCamino = Utilidades.buscarId(con, "SELECT id_compra FROM compras WHERE id_producto = ? "
+                + "AND id_componente IS NULL AND estado IN ('Pendiente', 'Aceptada') LIMIT 1", idProducto);
+        if (enCamino > 0) {
+            System.out.println("[COMPRAS] Ya hay un pedido de compra en camino (" + enCamino + ")");
+            return;
+        }
+        if (Utilidades.preguntarSiNo("Quieres pedir mas al proveedor?")) {
+            pedirAlProveedor(con, idProducto, 0);
+        } else {
+            System.out.println("De acuerdo. Compras lo vera en 'Ver lo que hay que comprar'");
+        }
+    }
+
+    public static boolean seFabrica(Connection con, int idProducto) throws SQLException {
+        return Utilidades.existe(con, "SELECT 1 FROM componentes_fabricacion WHERE id_producto = ?", idProducto);
+    }
+
+    public static int stockComponente(Connection con, int idComponente) throws SQLException {
+        return Math.max(0, Utilidades.buscarId(con,
+                "SELECT stock_actual FROM componentes_fabricacion WHERE id_componente = ?", idComponente));
+    }
+
+    // Marca la compra como recibida y suma las unidades al stock (de la pieza o del producto terminado)
     public static boolean recibirCompra(Connection con, int idCompra) {
         try {
             con.setAutoCommit(false);
@@ -508,8 +810,9 @@ public class Inventario {
             int idComponente;
             boolean sinComponente;
             int cantidad;
+            int idProducto;
             try (PreparedStatement ps = con.prepareStatement(
-                    "SELECT estado, id_componente, cantidad FROM compras WHERE id_compra = ? FOR UPDATE")) {
+                    "SELECT estado, id_componente, cantidad, id_producto FROM compras WHERE id_compra = ? FOR UPDATE")) {
                 ps.setInt(1, idCompra);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
@@ -521,6 +824,7 @@ public class Inventario {
                     idComponente = rs.getInt(2);
                     sinComponente = rs.wasNull();
                     cantidad = rs.getInt(3);
+                    idProducto = rs.getInt(4);
                 }
             }
             if ("Recibida".equals(estado)) {
@@ -534,15 +838,15 @@ public class Inventario {
                 return false;
             }
             if (sinComponente) {
-                con.rollback();
-                System.out.println("Ese pedido no esta ligado a ningun componente (es un pedido antiguo)");
-                return false;
-            }
-            try (PreparedStatement ps = con.prepareStatement(
-                    "UPDATE componentes_fabricacion SET stock_actual = stock_actual + ? WHERE id_componente = ?")) {
-                ps.setInt(1, cantidad);
-                ps.setInt(2, idComponente);
-                ps.executeUpdate();
+                // Compra de un producto terminado: va directo al stock del almacen
+                sumarStockProducto(con, idProducto, cantidad);
+            } else {
+                try (PreparedStatement ps = con.prepareStatement(
+                        "UPDATE componentes_fabricacion SET stock_actual = stock_actual + ? WHERE id_componente = ?")) {
+                    ps.setInt(1, cantidad);
+                    ps.setInt(2, idComponente);
+                    ps.executeUpdate();
+                }
             }
             try (PreparedStatement ps = con.prepareStatement(
                     "UPDATE compras SET estado = 'Recibida' WHERE id_compra = ?")) {
@@ -571,22 +875,127 @@ public class Inventario {
     // ============================================================
     // FABRICACION
     // ============================================================
-    public static void terminarOrdenMenu(Connection con) throws SQLException {
+    // Fabricacion crea una orden para tener unidades en stock (sin pedido de un cliente)
+    public static void crearOrdenMenu(Connection con) throws SQLException {
         if (!Usuarios.exigir("fabricacion")) return;
-        verFabricacion(con);
-        int id = Utilidades.leerEntero("ID de la orden a terminar (0 = cancelar): ");
-        if (id == 0) return;
-        if (terminarMontaje(con, id)) System.out.println("Orden terminada: componentes gastados y producto anadido al stock");
+        if (!listarProductosFabricables(con)) return;
+        int idProducto = Utilidades.leerEntero("ID del producto a fabricar (0 = cancelar): ");
+        if (idProducto == 0) return;
+        if (!seFabrica(con, idProducto)) {
+            System.out.println("Ese producto no tiene piezas definidas, asi que no se puede fabricar");
+            return;
+        }
+        int cantidad = Utilidades.leerEntero("Unidades a fabricar: ");
+        if (cantidad <= 0) {
+            System.out.println("La cantidad debe ser mayor que 0");
+            return;
+        }
+        if (!piezasSuficientes(con, idProducto, cantidad)) {
+            System.out.println("Aviso: la orden se crea, pero no se podra terminar hasta que lleguen las piezas");
+        }
+        int id = crearOrden(con, null, idProducto, cantidad);
+        System.out.println("[FABRICACION] Orden " + id + " creada: " + cantidad + " unidad(es) (estado: Pendiente)");
     }
 
-    // Gasta los componentes y suma 1 unidad del producto al stock
+    // Crea una orden de fabricacion. idPedido = null si es para stock. Devuelve su ID
+    public static int crearOrden(Connection con, Integer idPedido, int idProducto, int cantidad) throws SQLException {
+        String categoria = null;
+        try (PreparedStatement ps = con.prepareStatement("SELECT categoria FROM productos WHERE id_producto = ?")) {
+            ps.setInt(1, idProducto);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) categoria = rs.getString(1);
+            }
+        }
+        try (PreparedStatement ps = con.prepareStatement(
+                "INSERT INTO fabricacion (id_pedido, id_producto, cantidad, tipo, id_usuario, fecha, estado) "
+                + "VALUES (?, ?, ?, ?, ?, CURRENT_DATE, 'Pendiente') RETURNING id_montaje")) {
+            if (idPedido == null) ps.setNull(1, Types.INTEGER);
+            else ps.setInt(1, idPedido);
+            ps.setInt(2, idProducto);
+            ps.setInt(3, cantidad);
+            ps.setString(4, tipoDe(categoria));
+            ps.setInt(5, Usuarios.idUsuarioActual);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        }
+    }
+
+    // Comprueba las piezas para montar 'unidades'. Si faltan, ofrece pedirlas al proveedor
+    private static boolean piezasSuficientes(Connection con, int idProducto, int unidades) throws SQLException {
+        boolean todoBien = true;
+        for (Comp c : cargarComponentes(con, idProducto, false)) {
+            int necesario = c.necesaria() * unidades;
+            int deficit;
+            while ((deficit = necesario - stockComponente(con, c.id())) > 0) {
+                System.out.println("[FABRICACION] Falta pieza: " + c.nombre() + " (hacen falta " + necesario
+                        + ", faltan " + deficit + ")");
+                if (!Utilidades.preguntarSiNo("   Pedir las " + deficit + " que faltan al proveedor?")
+                        || !reponerComponente(con, c, deficit)) {
+                    todoBien = false;
+                    break;
+                }
+            }
+        }
+        return todoBien;
+    }
+
+    public static void terminarOrdenMenu(Connection con) throws SQLException {
+        if (!Usuarios.exigir("fabricacion")) return;
+        if (!listarOrdenes(con, true)) return;
+        int id = Utilidades.leerEntero("ID de la orden a terminar (0 = cancelar): ");
+        if (id == 0) return;
+        String abierta = "FROM fabricacion WHERE id_montaje = ? AND estado NOT IN ('Terminada', 'Cancelada')";
+        int idProducto = Utilidades.buscarId(con, "SELECT id_producto " + abierta, id);
+        if (idProducto < 0) {
+            System.out.println("Esa orden no existe o ya esta cerrada");
+            return;
+        }
+        int cantidad = Utilidades.buscarId(con, "SELECT cantidad " + abierta, id);
+        if (!piezasSuficientes(con, idProducto, cantidad)) {
+            System.out.println("No se puede terminar la orden: faltan piezas. Vuelve a intentarlo cuando lleguen");
+            return;
+        }
+        if (terminarMontaje(con, id)) {
+            System.out.println("Orden terminada: piezas gastadas y " + cantidad + " unidad(es) sumadas al stock");
+            Ventas.procesarPedidosEnEspera(con);
+        }
+    }
+
+    // Solo se cancelan las ordenes para stock: las de un pedido las espera un cliente
+    public static void cancelarOrdenMenu(Connection con) throws SQLException {
+        if (!Usuarios.exigir("fabricacion")) return;
+        if (!listarOrdenes(con, true)) return;
+        int id = Utilidades.leerEntero("ID de la orden a cancelar (0 = cancelar): ");
+        if (id == 0) return;
+        if (!Utilidades.existe(con, "SELECT 1 FROM fabricacion WHERE id_montaje = ? "
+                + "AND estado NOT IN ('Terminada', 'Cancelada')", id)) {
+            System.out.println("Esa orden no existe o ya esta cerrada");
+            return;
+        }
+        int idPedido = Utilidades.buscarId(con, "SELECT COALESCE(id_pedido, -1) FROM fabricacion WHERE id_montaje = ?", id);
+        if (idPedido > 0) {
+            System.out.println("Esa orden es del pedido " + idPedido + " de un cliente: no se puede cancelar");
+            return;
+        }
+        if (!Utilidades.preguntarSiNo("Seguro que quieres cancelar la orden " + id + "?")) return;
+        try (PreparedStatement ps = con.prepareStatement("UPDATE fabricacion SET estado = 'Cancelada' WHERE id_montaje = ?")) {
+            ps.setInt(1, id);
+            ps.executeUpdate();
+        }
+        System.out.println("Orden " + id + " cancelada (no se ha gastado ninguna pieza)");
+    }
+
+    // Gasta las piezas de toda la orden y suma sus unidades al stock del producto
     public static boolean terminarMontaje(Connection con, int idMontaje) {
         try {
             con.setAutoCommit(false);
             String estado;
             int idProducto;
+            int cantidad;
             try (PreparedStatement ps = con.prepareStatement(
-                    "SELECT estado, id_producto FROM fabricacion WHERE id_montaje = ? FOR UPDATE")) {
+                    "SELECT estado, id_producto, cantidad FROM fabricacion WHERE id_montaje = ? FOR UPDATE")) {
                 ps.setInt(1, idMontaje);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
@@ -596,31 +1005,32 @@ public class Inventario {
                     }
                     estado = rs.getString(1);
                     idProducto = rs.getInt(2);
+                    cantidad = rs.getInt(3);
                 }
             }
-            if ("Terminada".equals(estado)) {
+            if ("Terminada".equals(estado) || "Cancelada".equals(estado)) {
                 con.rollback();
-                System.out.println("Esa orden ya estaba terminada");
+                System.out.println("Esa orden ya estaba " + estado.toLowerCase());
                 return false;
             }
             List<Comp> comps = cargarComponentes(con, idProducto, true);
             for (Comp c : comps) {
-                if (c.stock() < c.necesaria()) {
+                if (c.stock() < c.necesaria() * cantidad) {
                     con.rollback();
-                    System.out.println("Falta componente: " + c.nombre() + " (hay " + c.stock()
-                            + ", hacen falta " + c.necesaria() + "). Compralo y vuelve a intentarlo");
+                    System.out.println("Falta pieza: " + c.nombre() + " (hay " + c.stock()
+                            + ", hacen falta " + c.necesaria() * cantidad + "). Compralas y vuelve a intentarlo");
                     return false;
                 }
             }
             for (Comp c : comps) {
                 try (PreparedStatement ps = con.prepareStatement(
                         "UPDATE componentes_fabricacion SET stock_actual = stock_actual - ? WHERE id_componente = ?")) {
-                    ps.setInt(1, c.necesaria());
+                    ps.setInt(1, c.necesaria() * cantidad);
                     ps.setInt(2, c.id());
                     ps.executeUpdate();
                 }
             }
-            sumarStockProducto(con, idProducto, 1);
+            sumarStockProducto(con, idProducto, cantidad);
             try (PreparedStatement ps = con.prepareStatement(
                     "UPDATE fabricacion SET estado = 'Terminada' WHERE id_montaje = ?")) {
                 ps.setInt(1, idMontaje);
@@ -732,6 +1142,14 @@ public class Inventario {
                 ps.executeUpdate();
             }
         }
+    }
+
+    // El campo 'tipo' de fabricacion tiene 10 caracteres
+    private static String tipoDe(String categoria) {
+        String c = categoria == null ? "" : categoria.toLowerCase();
+        if (c.contains("bici")) return "bici";
+        if (c.contains("snow") || c.contains("tabla")) return "snow";
+        return c.isEmpty() ? "otro" : (c.length() > 10 ? c.substring(0, 10) : c);
     }
 
     // Lee los componentes de un producto. Con bloquear=true se bloquean las filas

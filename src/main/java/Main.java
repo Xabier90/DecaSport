@@ -6,7 +6,7 @@ import java.sql.Statement;
 public class Main {
 
     // Datos de conexion: cambia la contrasena por la tuya
-    private static final String URL = "jdbc:postgresql://192.168.28.159:5432/decasport";
+    private static final String URL = "jdbc:postgresql://localhost:5432/decasport";
     private static final String USUARIO = "postgres";
     private static final String CONTRASENA = "decasport123";
 
@@ -16,6 +16,8 @@ public class Main {
             prepararBaseDeDatos(con);
             Usuarios.crearUsuariosPorDefecto(con);
             Usuarios.corregirRolesAntiguos(con);
+            // Por si ha entrado stock desde otro programa (por ejemplo el de Python)
+            Ventas.procesarPedidosEnEspera(con);
             menuInicial(con);
         } catch (SQLException e) {
             System.out.println("Error con la base de datos: " + e.getMessage());
@@ -47,9 +49,15 @@ public class Main {
                 + "id_usuario INTEGER REFERENCES usuarios(id_usuario), "
                 + "fecha DATE NOT NULL DEFAULT CURRENT_DATE, "
                 + "estado VARCHAR(20) NOT NULL DEFAULT 'Abierta')",
+            // Pedido de venta que genero la oportunidad al aceptarse (trazabilidad CRM -> Ventas)
+            "ALTER TABLE oportunidades ADD COLUMN IF NOT EXISTS id_pedido INTEGER REFERENCES pedidos(id_pedido)",
 
             // La tabla antigua solo dejaba fabricar 'bici' o 'snow': asi se puede fabricar cualquier producto
-            "ALTER TABLE fabricacion DROP CONSTRAINT IF EXISTS montajes_tipo_check"
+            "ALTER TABLE fabricacion DROP CONSTRAINT IF EXISTS montajes_tipo_check",
+            // Una orden puede ser para un pedido o para tener stock (sin pedido), y de varias unidades
+            "ALTER TABLE fabricacion ALTER COLUMN id_pedido DROP NOT NULL",
+            "ALTER TABLE fabricacion ADD COLUMN IF NOT EXISTS cantidad INTEGER NOT NULL DEFAULT 1 CHECK (cantidad > 0)",
+            "ALTER TABLE fabricacion ALTER COLUMN estado SET DEFAULT 'Pendiente'"
         };
         try (Statement st = con.createStatement()) {
             for (String s : sentencias) st.execute(s);
@@ -187,20 +195,24 @@ public class Main {
             titulo(tituloDepartamento("CRM"));
             seccion("CLIENTES");
             opcion(1, "Ver clientes");
-            opcion(2, "Borrar un cliente");
+            opcion(2, "Ver lo que ha comprado cada cliente");
+            opcion(3, "Borrar un cliente");
             seccion("OPORTUNIDADES DE VENTA");
-            opcion(3, "Ver oportunidades");
-            opcion(4, "Crear una oportunidad (lanza pedido, compra, fabricacion y factura)");
+            opcion(4, "Ver oportunidades");
+            opcion(5, "Crear una oportunidad (lanza pedido, compra/fabricacion y factura)");
+            opcion(6, "Responder a una oportunidad abierta");
             seccion("INFORMES");
-            opcion(5, "Informe de CRM");
+            opcion(7, "Informe de CRM");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
                     case 1 -> Ventas.verClientes(con);
-                    case 2 -> Ventas.borrarCliente(con);
-                    case 3 -> Ventas.verOportunidades(con);
-                    case 4 -> Ventas.crearOportunidad(con);
-                    case 5 -> Informes.informeCrm(con);
+                    case 2 -> Ventas.verComprasDeClientes(con);
+                    case 3 -> Ventas.borrarCliente(con);
+                    case 4 -> Ventas.verOportunidades(con);
+                    case 5 -> Ventas.crearOportunidad(con);
+                    case 6 -> Ventas.responderOportunidad(con);
+                    case 7 -> Informes.informeCrm(con);
                     case 0 -> {
                         return;
                     }
@@ -218,18 +230,22 @@ public class Main {
             titulo(tituloDepartamento("VENTAS"));
             seccion("PEDIDOS DE VENTA");
             opcion(1, "Ver pedidos de venta");
-            opcion(2, "Facturar un pedido pendiente");
+            opcion(2, "Ver lo que ha comprado cada cliente");
+            opcion(3, "Facturar un pedido pendiente");
+            opcion(4, "Reanudar un pedido parado (falta material o sin enviar)");
             seccion("FACTURAS");
-            opcion(3, "Ver facturas");
+            opcion(5, "Ver facturas");
             seccion("INFORMES");
-            opcion(4, "Informe de Ventas");
+            opcion(6, "Informe de Ventas");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
                     case 1 -> Ventas.verPedidos(con);
-                    case 2 -> Ventas.facturarPedido(con);
-                    case 3 -> Ventas.verFacturas(con);
-                    case 4 -> Informes.informeVentas(con);
+                    case 2 -> Ventas.verComprasDeClientes(con);
+                    case 3 -> Ventas.facturarPedido(con);
+                    case 4 -> Ventas.reanudarPedido(con);
+                    case 5 -> Ventas.verFacturas(con);
+                    case 6 -> Informes.informeVentas(con);
                     case 0 -> {
                         return;
                     }
@@ -243,14 +259,20 @@ public class Main {
 
     // COMPRAS: proveedores y pedidos de compra de componentes
     private static void menuCompras(Connection con) {
+        // Nada mas entrar se avisa de los productos que se han quedado sin stock
+        try {
+            Inventario.avisarAgotados(con);
+        } catch (SQLException e) {
+            System.out.println("Error en la base de datos: " + e.getMessage());
+        }
         while (true) {
             titulo(tituloDepartamento("COMPRAS"));
             seccion("PROVEEDORES");
             opcion(1, "Ver proveedores");
             seccion("PEDIDOS DE COMPRA");
-            opcion(2, "Ver componentes que hay que comprar (bajo minimo)");
+            opcion(2, "Ver lo que hay que comprar (productos agotados y piezas bajo minimo)");
             opcion(3, "Ver pedidos de compra");
-            opcion(4, "Crear un pedido de compra");
+            opcion(4, "Crear un pedido de compra (producto terminado o pieza)");
             opcion(5, "Registrar la llegada de un pedido (suma al stock)");
             seccion("INFORMES");
             opcion(6, "Informe de Compras");
@@ -258,7 +280,7 @@ public class Main {
             try {
                 switch (op) {
                     case 1 -> Inventario.verProveedores(con);
-                    case 2 -> Inventario.verComponentesAComprar(con);
+                    case 2 -> Inventario.verLoQueHayQueComprar(con);
                     case 3 -> Inventario.verCompras(con);
                     case 4 -> Inventario.crearCompraManual(con);
                     case 5 -> Inventario.recibirCompraMenu(con);
@@ -319,18 +341,22 @@ public class Main {
             titulo(tituloDepartamento("FABRICACION"));
             seccion("ORDENES DE FABRICACION");
             opcion(1, "Ver ordenes de fabricacion");
-            opcion(2, "Terminar una orden (gasta piezas y suma el producto al stock)");
+            opcion(2, "Crear una orden de fabricacion (para stock)");
+            opcion(3, "Terminar una orden (gasta piezas y suma el producto al stock)");
+            opcion(4, "Cancelar una orden");
             seccion("PIEZAS");
-            opcion(3, "Ver las piezas que lleva un producto");
+            opcion(5, "Ver las piezas de un producto y cuantos se pueden montar");
             seccion("INFORMES");
-            opcion(4, "Informe de Fabricacion");
+            opcion(6, "Informe de Fabricacion");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
                     case 1 -> Inventario.verFabricacion(con);
-                    case 2 -> Inventario.terminarOrdenMenu(con);
-                    case 3 -> Inventario.verPiezasDeProducto(con);
-                    case 4 -> Informes.informeFabricacion(con);
+                    case 2 -> Inventario.crearOrdenMenu(con);
+                    case 3 -> Inventario.terminarOrdenMenu(con);
+                    case 4 -> Inventario.cancelarOrdenMenu(con);
+                    case 5 -> Inventario.verPiezasDeProducto(con);
+                    case 6 -> Informes.informeFabricacion(con);
                     case 0 -> {
                         return;
                     }
@@ -348,11 +374,15 @@ public class Main {
             titulo("MENU CLIENTE   (usuario: " + Usuarios.nombreActual + ")");
             opcion(1, "Ver catalogo de productos");
             opcion(2, "Hacer un pedido");
+            opcion(3, "Mis pedidos");
+            opcion(4, "Cancelar un pedido que espera stock");
             int op = pedirOpcion("Cerrar sesion");
             try {
                 switch (op) {
                     case 1 -> Inventario.verProductos(con);
                     case 2 -> Ventas.hacerPedido(con);
+                    case 3 -> Ventas.misPedidos(con);
+                    case 4 -> Ventas.cancelarPedidoEnEspera(con);
                     case 0 -> {
                         return;
                     }

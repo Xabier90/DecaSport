@@ -75,6 +75,16 @@ public class Utilidades {
         }
     }
 
+    // Devuelve el primer entero de la consulta, o -1 si no hay filas
+    public static int buscarId(Connection con, String sql, int id) throws SQLException {
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setInt(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : -1;
+            }
+        }
+    }
+
     public static void rollback(Connection con) {
         try {
             con.rollback();

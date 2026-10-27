@@ -75,6 +75,12 @@ public class Informes {
         tabla(con, "PEDIDOS POR ESTADO",
                 "SELECT COALESCE(estado, '-') AS estado, COUNT(*) AS pedidos FROM pedidos GROUP BY 1 ORDER BY 2 DESC",
                 "Todavia no hay pedidos");
+        tabla(con, "PEDIDOS DE CLIENTES ESPERANDO STOCK",
+                "SELECT p.id_pedido AS pedido, c.nombre AS cliente, p.fecha, pr.nombre AS producto, "
+                + "l.cantidad AS pedidas FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
+                + "JOIN lineas_pedido l ON l.id_pedido = p.id_pedido JOIN productos pr ON pr.id_producto = l.id_producto "
+                + "WHERE p.estado = '" + Inventario.ESPERANDO + "' ORDER BY p.id_pedido",
+                "No hay pedidos esperando stock");
         tabla(con, "TOP 5 CLIENTES POR FACTURACION",
                 "SELECT c.nombre AS cliente, COUNT(f.id_factura) AS facturas, ROUND(SUM(f.total)::numeric, 2) AS total_eur "
                 + "FROM facturas f JOIN pedidos p ON p.id_pedido = f.id_pedido "
@@ -101,6 +107,16 @@ public class Informes {
                 "SELECT TO_CHAR(fecha, 'YYYY-MM') AS mes, COUNT(*) AS pedidos, SUM(cantidad) AS unidades "
                 + "FROM compras GROUP BY 1 ORDER BY 1",
                 "Todavia no hay pedidos de compra");
+        tabla(con, "PRODUCTOS AGOTADOS QUE HAY QUE PEDIR AL PROVEEDOR",
+                "SELECT p.nombre AS producto, COALESCE(pv.nombre, '(sin proveedor)') AS proveedor, "
+                + "CASE WHEN EXISTS (SELECT 1 FROM compras c WHERE c.id_producto = p.id_producto "
+                + "AND c.id_componente IS NULL AND c.estado IN ('Pendiente', 'Aceptada')) "
+                + "THEN 'si' ELSE 'no' END AS pedido_en_camino "
+                + "FROM productos p LEFT JOIN proveedores pv ON pv.id_proveedor = p.id_proveedor "
+                + "WHERE NOT EXISTS (SELECT 1 FROM componentes_fabricacion cf WHERE cf.id_producto = p.id_producto) "
+                + "AND COALESCE((SELECT SUM(s.cantidad) FROM stock s WHERE s.id_producto = p.id_producto), 0) = 0 "
+                + "ORDER BY p.nombre",
+                "No hay productos agotados");
         tabla(con, "COMPONENTES QUE HAY QUE COMPRAR (bajo minimo)",
                 "SELECT cf.nombre AS componente, cf.stock_actual AS stock, cf.stock_minimo AS minimo, "
                 + "cf.stock_minimo - cf.stock_actual AS faltan, COALESCE(pv.nombre, '(sin proveedor)') AS proveedor "
@@ -140,10 +156,16 @@ public class Informes {
                 "SELECT COALESCE(estado, '-') AS estado, COUNT(*) AS ordenes FROM fabricacion GROUP BY 1 ORDER BY 2 DESC",
                 "Todavia no hay ordenes de fabricacion");
         tabla(con, "UNIDADES FABRICADAS POR PRODUCTO (ordenes terminadas)",
-                "SELECT COALESCE(p.nombre, '-') AS producto, COUNT(*) AS unidades "
+                "SELECT COALESCE(p.nombre, '-') AS producto, COUNT(*) AS ordenes, SUM(f.cantidad) AS unidades "
                 + "FROM fabricacion f LEFT JOIN productos p ON p.id_producto = f.id_producto "
-                + "WHERE f.estado = 'Terminada' GROUP BY 1 ORDER BY 2 DESC",
+                + "WHERE f.estado = 'Terminada' GROUP BY 1 ORDER BY 3 DESC",
                 "Todavia no se ha terminado ninguna orden");
+        tabla(con, "ORDENES SIN TERMINAR",
+                "SELECT f.id_montaje AS orden, p.nombre AS producto, f.cantidad AS unidades, "
+                + "COALESCE('pedido ' || f.id_pedido, 'para stock') AS destino, f.fecha "
+                + "FROM fabricacion f JOIN productos p ON p.id_producto = f.id_producto "
+                + "WHERE f.estado NOT IN ('Terminada', 'Cancelada') ORDER BY f.id_montaje",
+                "No hay ordenes pendientes");
         tabla(con, "ORDENES POR TIPO",
                 "SELECT COALESCE(tipo, '-') AS tipo, COUNT(*) AS ordenes FROM fabricacion GROUP BY 1 ORDER BY 2 DESC",
                 "Todavia no hay ordenes de fabricacion");
@@ -239,6 +261,7 @@ public class Informes {
     private static void productosMasVendidos(Connection con) throws SQLException {
         String sql = "SELECT p.nombre, SUM(l.cantidad) AS unidades, SUM(l.cantidad * p.precio) AS importe "
                    + "FROM lineas_pedido l JOIN productos p ON p.id_producto = l.id_producto "
+                   + "JOIN pedidos pe ON pe.id_pedido = l.id_pedido WHERE pe.estado <> 'Cancelado' "
                    + "GROUP BY p.id_producto, p.nombre ORDER BY unidades DESC LIMIT 5";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             System.out.println("\n--- TOP 5 PRODUCTOS MAS PEDIDOS ---");
