@@ -65,7 +65,11 @@ public class Main {
             "ALTER TABLE lineas_pedido ADD COLUMN IF NOT EXISTS precio NUMERIC(10,2)",
             "UPDATE lineas_pedido l SET precio = p.precio FROM productos p "
                 + "WHERE p.id_producto = l.id_producto AND l.precio IS NULL",
-            "ALTER TABLE lineas_pedido ALTER COLUMN precio SET NOT NULL"
+            "ALTER TABLE lineas_pedido ALTER COLUMN precio SET NOT NULL",
+
+            // Antes los pedidos de clientes restaban el stock al tramitarse y quedaban 'pendiente'.
+            // Ahora el stock se resta al enviar: esos pedidos ya lo habian restado, asi que son 'Enviado'
+            "UPDATE pedidos SET estado = 'Enviado' WHERE estado = 'pendiente'"
         };
         try (Statement st = con.createStatement()) {
             for (String s : sentencias) st.execute(s);
@@ -241,8 +245,8 @@ public class Main {
             seccion("PEDIDOS DE VENTA");
             opcion(1, "Ver pedidos de venta");
             opcion(2, "Ver lo que ha comprado cada cliente");
-            opcion(3, "Facturar un pedido pendiente");
-            opcion(4, "Reanudar un pedido parado (falta material o sin enviar)");
+            opcion(3, "Facturar un pedido enviado");
+            opcion(4, "Reanudar un pedido parado (falta material)");
             seccion("FACTURAS");
             opcion(5, "Ver facturas");
             seccion("INFORMES");
@@ -306,8 +310,14 @@ public class Main {
         }
     }
 
-    // INVENTARIO: catalogo de productos, stock y componentes
+    // INVENTARIO (almacen): catalogo de productos, stock, componentes y envios
     private static void menuInventario(Connection con) {
+        // Nada mas entrar se avisa de los pedidos que esperan a que se envien
+        try {
+            Ventas.avisarEnviosPendientes(con);
+        } catch (SQLException e) {
+            System.out.println("Error en la base de datos: " + e.getMessage());
+        }
         while (true) {
             titulo(tituloDepartamento("INVENTARIO"));
             seccion("PRODUCTOS");
@@ -320,8 +330,10 @@ public class Main {
             opcion(6, "Anadir un componente");
             opcion(7, "Editar un componente");
             opcion(8, "Borrar un componente");
+            seccion("ENVIOS");
+            opcion(9, "Validar un envio (albaran de salida: resta el stock)");
             seccion("INFORMES");
-            opcion(9, "Informe de Inventario");
+            opcion(10, "Informe de Inventario");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
@@ -333,7 +345,8 @@ public class Main {
                     case 6 -> Inventario.anadirComponente(con);
                     case 7 -> Inventario.editarComponente(con);
                     case 8 -> Inventario.borrarComponente(con);
-                    case 9 -> Informes.informeInventario(con);
+                    case 9 -> Ventas.validarEnvioMenu(con);
+                    case 10 -> Informes.informeInventario(con);
                     case 0 -> {
                         return;
                     }

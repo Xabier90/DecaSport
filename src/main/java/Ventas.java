@@ -201,33 +201,98 @@ public class Ventas {
     }
 
     // ============================================================
-    // FACTURAR PEDIDOS (departamento de ventas)
+    // ENVIO Y FACTURA (como en Odoo: dos pasos de dos departamentos)
+    //   'Listo envio' --(Inventario valida el albaran: resta el stock)--> 'Enviado'
+    //   'Enviado'     --(Ventas emite la factura)-----------------------> 'Facturado'
     // ============================================================
-    // Pedidos que se pueden facturar:
-    //  - 'pendiente'  : pedidos hechos por clientes (el stock ya se resto al hacer el pedido)
-    //  - 'Listo envio': pedidos de la cadena del CRM ya preparados (el stock se resta al enviarlos)
-    public static void facturarPedido(Connection con) throws SQLException {
-        if (!Usuarios.exigir("ventas")) return;
-        String sql = "SELECT p.id_pedido, c.nombre, p.fecha, p.estado, "
+
+    // Pedidos en un estado con su cliente y total. Devuelve {id -> total} de los que salen
+    private static java.util.Map<Integer, Double> listarPedidosEnEstado(Connection con, String estado, String titulo)
+            throws SQLException {
+        String sql = "SELECT p.id_pedido, c.nombre, p.fecha, COALESCE(SUM(l.cantidad), 0), "
                    + "COALESCE(SUM(l.cantidad * l.precio), 0) "
                    + "FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
                    + "LEFT JOIN lineas_pedido l ON l.id_pedido = p.id_pedido "
-                   + "WHERE p.estado IN ('pendiente', 'Listo envio') "
-                   + "AND NOT EXISTS (SELECT 1 FROM facturas f WHERE f.id_pedido = p.id_pedido) "
+                   + "WHERE p.estado = ? AND NOT EXISTS (SELECT 1 FROM facturas f WHERE f.id_pedido = p.id_pedido) "
                    + "GROUP BY p.id_pedido, c.nombre ORDER BY p.id_pedido";
-        java.util.Map<Integer, Double> totales = new java.util.HashMap<>();
-        java.util.Map<Integer, String> estados = new java.util.HashMap<>();
-        System.out.println("\n--- PEDIDOS PENDIENTES DE FACTURAR ---");
-        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                totales.put(rs.getInt(1), rs.getDouble(5));
-                estados.put(rs.getInt(1), rs.getString(4));
-                System.out.printf("Pedido %d | %s | %s | %s | %.2f EUR%n",
-                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getDouble(5));
+        java.util.Map<Integer, Double> totales = new java.util.LinkedHashMap<>();
+        System.out.println("\n--- " + titulo + " ---");
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, estado);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    totales.put(rs.getInt(1), rs.getDouble(5));
+                    System.out.printf("Pedido %d | %s | %s | %d unidad(es) | %.2f EUR%n",
+                            rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4), rs.getDouble(5));
+                }
             }
         }
+        return totales;
+    }
+
+    // Al entrar en Inventario: avisa de los pedidos que esperan a que se envien
+    public static void avisarEnviosPendientes(Connection con) throws SQLException {
+        int n;
+        try (Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM pedidos WHERE estado = 'Listo envio'")) {
+            rs.next();
+            n = rs.getInt(1);
+        }
+        if (n > 0) {
+            System.out.println("\n!! AVISO: hay " + n + " pedido(s) listos para enviar. "
+                    + "Validalos en 'Validar un envio (albaran de salida)'");
+        }
+    }
+
+    // INVENTARIO: valida el albaran de salida. Resta el stock y el pedido queda 'Enviado'
+    public static void validarEnvioMenu(Connection con) throws SQLException {
+        if (!Usuarios.exigir("inventario")) return;
+        java.util.Map<Integer, Double> pedidos = listarPedidosEnEstado(con, "Listo envio", "PEDIDOS LISTOS PARA ENVIAR");
+        if (pedidos.isEmpty()) {
+            System.out.println("No hay pedidos listos para enviar");
+            return;
+        }
+        int id = Utilidades.leerEntero("ID del pedido a enviar (0 = cancelar): ");
+        if (id == 0) return;
+        if (!pedidos.containsKey(id)) {
+            System.out.println("Ese pedido no esta en la lista");
+            return;
+        }
+        List<Linea> lineas = cargarLineas(con, id);
+        for (Linea l : lineas) System.out.println("   - " + l.cantidad() + " x " + l.nombre());
+        if (!Utilidades.preguntarSiNo("Validar el albaran y enviar el pedido " + id + "?")) {
+            System.out.println("Cancelado");
+            return;
+        }
+        try {
+            con.setAutoCommit(false);
+            for (Linea l : lineas) {
+                if (!Inventario.descontarStockTotal(con, l.idProducto(), l.cantidad())) {
+                    con.rollback();
+                    System.out.println("No hay stock suficiente de " + l.nombre() + " para enviar el pedido " + id);
+                    return;
+                }
+            }
+            cambiarEstadoPedido(con, id, "Enviado");
+            con.commit();
+            System.out.println("[INVENTARIO] Albaran validado: pedido " + id + " ENVIADO. Ventas ya lo puede facturar");
+        } catch (SQLException e) {
+            Utilidades.rollback(con);
+            System.out.println("No se ha podido enviar el pedido: " + e.getMessage());
+            return;
+        } finally {
+            Utilidades.activarAutoCommit(con);
+        }
+        // Si algun producto que compramos se ha quedado sin stock, se pregunta si se pide mas
+        for (Linea l : lineas) Inventario.comprobarAgotado(con, l.idProducto());
+    }
+
+    // VENTAS: factura los pedidos que ya ha enviado Inventario
+    public static void facturarPedido(Connection con) throws SQLException {
+        if (!Usuarios.exigir("ventas")) return;
+        java.util.Map<Integer, Double> totales = listarPedidosEnEstado(con, "Enviado", "PEDIDOS ENVIADOS SIN FACTURAR");
         if (totales.isEmpty()) {
-            System.out.println("No hay pedidos pendientes de facturar");
+            System.out.println("No hay pedidos enviados sin facturar (Inventario los envia en 'Validar un envio')");
             return;
         }
         int id = Utilidades.leerEntero("ID del pedido a facturar (0 = cancelar): ");
@@ -236,35 +301,18 @@ public class Ventas {
             System.out.println("Ese pedido no esta en la lista");
             return;
         }
-        if (!Utilidades.preguntarSiNo(String.format("Se enviara y facturara el pedido %d por %.2f EUR. Confirmar?",
+        if (!Utilidades.preguntarSiNo(String.format("Se facturara el pedido %d por %.2f EUR. Confirmar?",
                 id, totales.get(id)))) {
             System.out.println("Cancelado");
             return;
         }
-        // Los pedidos de la cadena todavia no han restado el stock: se resta al enviarlos
-        boolean restarStock = "Listo envio".equals(estados.get(id));
-        if (!enviarYFacturar(con, id, restarStock) && restarStock) {
-            System.out.println("Puedes conseguir el material con Ventas > 'Reanudar un pedido parado'");
-        }
+        facturar(con, id, totales.get(id));
     }
 
-    // Resta el stock (si hace falta), emite la factura y deja el pedido 'Facturado'.
-    // Despues pregunta si se repone lo que se haya quedado sin stock
-    private static boolean enviarYFacturar(Connection con, int idPedido, boolean restarStock) throws SQLException {
-        List<Linea> lineas = cargarLineas(con, idPedido);
-        double total = 0;
-        for (Linea l : lineas) total += l.precio() * l.cantidad();
+    // Emite la factura y deja el pedido 'Facturado'
+    private static void facturar(Connection con, int idPedido, double total) throws SQLException {
         try {
             con.setAutoCommit(false);
-            if (restarStock) {
-                for (Linea l : lineas) {
-                    if (!Inventario.descontarStockTotal(con, l.idProducto(), l.cantidad())) {
-                        con.rollback();
-                        System.out.println("No hay stock suficiente de " + l.nombre() + " para enviar el pedido " + idPedido);
-                        return false;
-                    }
-                }
-            }
             int idFactura;
             try (PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO facturas (id_pedido, fecha, total) VALUES (?, CURRENT_DATE, ?) RETURNING id_factura")) {
@@ -277,18 +325,13 @@ public class Ventas {
             }
             cambiarEstadoPedido(con, idPedido, "Facturado");
             con.commit();
-            System.out.printf("[VENTAS] Pedido %d enviado. Factura %d emitida por %.2f EUR%n", idPedido, idFactura, total);
+            System.out.printf("[VENTAS] Factura %d emitida por %.2f EUR: pedido %d FACTURADO%n", idFactura, total, idPedido);
         } catch (SQLException e) {
             Utilidades.rollback(con);
             System.out.println("No se ha podido facturar el pedido: " + e.getMessage());
-            return false;
         } finally {
             Utilidades.activarAutoCommit(con);
         }
-        if (restarStock) {
-            for (Linea l : lineas) Inventario.comprobarAgotado(con, l.idProducto());
-        }
-        return true;
     }
 
     // Pedidos de la cadena del CRM que se quedaron a medias: se sigue donde se paro
@@ -296,8 +339,7 @@ public class Ventas {
         if (!Usuarios.exigir("ventas")) return;
         String sql = "SELECT p.id_pedido, c.nombre, p.fecha, p.estado FROM pedidos p "
                    + "JOIN clientes c ON c.id_cliente = p.id_cliente "
-                   + "WHERE p.estado IN ('Confirmado', 'Falta material', 'Listo envio') "
-                   + "AND NOT EXISTS (SELECT 1 FROM facturas f WHERE f.id_pedido = p.id_pedido) "
+                   + "WHERE p.estado IN ('Confirmado', 'Falta material') "
                    + "ORDER BY p.id_pedido";
         List<Integer> ids = new ArrayList<>();
         System.out.println("\n--- PEDIDOS PARADOS ---");
@@ -444,23 +486,25 @@ public class Ventas {
     // PEDIDOS EN ESPERA DE STOCK
     // ============================================================
 
-    // Usar dentro de una transaccion. Si hay stock para todo el pedido (respetando a los pedidos
-    // mas antiguos sin enviar, tambien los del CRM), resta el stock y lo deja 'pendiente' de facturar
+    // Si hay stock para todo el pedido (respetando a los pedidos mas antiguos sin enviar, tambien
+    // los del CRM), el pedido queda 'Listo envio' con sus unidades reservadas. El stock no se
+    // resta hasta que Inventario valida el envio
     private static boolean intentarServir(Connection con, int idPedido) throws SQLException {
-        List<Linea> lineas = cargarLineas(con, idPedido);
-        for (Linea l : lineas) {
-            int libre = Inventario.stockTotal(con, l.idProducto()) - reservadoAntesDe(con, l.idProducto(), idPedido);
-            if (l.cantidad() > libre) return false;
+        for (Linea l : agruparPorProducto(cargarLineas(con, idPedido))) {
+            if (l.cantidad() > disponible(con, l.idProducto(), idPedido)) return false;
         }
-        java.sql.Savepoint antes = con.setSavepoint();
-        for (Linea l : lineas) {
-            if (!Inventario.descontarStockTotal(con, l.idProducto(), l.cantidad())) {
-                con.rollback(antes);
-                return false;
-            }
-        }
-        cambiarEstadoPedido(con, idPedido, "pendiente");
+        cambiarEstadoPedido(con, idPedido, "Listo envio");
         return true;
+    }
+
+    // Un producto puede estar en varias lineas del pedido: se suman sus cantidades
+    private static java.util.Collection<Linea> agruparPorProducto(List<Linea> lineas) {
+        java.util.Map<Integer, Linea> porProducto = new java.util.LinkedHashMap<>();
+        for (Linea l : lineas) {
+            porProducto.merge(l.idProducto(), l, (a, b) ->
+                    new Linea(a.idProducto(), a.nombre(), a.precio(), a.cantidad() + b.cantidad()));
+        }
+        return porProducto.values();
     }
 
     // Unidades del producto reservadas por pedidos sin enviar mas antiguos que este
@@ -501,7 +545,7 @@ public class Ventas {
                 if (intentarServir(con, ids.get(i))) {
                     con.commit();
                     System.out.println("[VENTAS] Ya hay stock para el pedido " + ids.get(i) + " de " + clientes.get(i)
-                            + " que estaba esperando: TRAMITADO AUTOMATICAMENTE (listo para facturar)");
+                            + " que estaba esperando: TRAMITADO AUTOMATICAMENTE (listo para enviar)");
                 } else {
                     con.rollback();
                 }
@@ -642,7 +686,8 @@ public class Ventas {
     private static String estadoLegible(String estado) {
         if (estado == null) return "-";
         return switch (estado) {
-            case "pendiente" -> "Preparado (pendiente de envio y factura)";
+            case "Listo envio" -> "Preparado (pendiente de envio)";
+            case "Enviado" -> "Enviado (pendiente de factura)";
             case Inventario.ESPERANDO -> "Esperando stock (se tramitara automaticamente)";
             case "Facturado" -> "Enviado y facturado";
             default -> estado;
@@ -820,17 +865,10 @@ public class Ventas {
         for (Linea l : cargarLineas(con, idPedido)) {
             if (!conseguirStock(con, idPedido, l)) return;
         }
+        // Las unidades quedan reservadas: Inventario envia el pedido y despues Ventas lo factura
         cambiarEstadoPedido(con, idPedido, "Listo envio");
-        if (!Utilidades.preguntarSiNo("[ENVIO] Confirmas el envio del pedido " + idPedido + " al cliente?")) {
-            System.out.println(">> Pedido listo para envio. Ventas lo puede enviar y facturar despues "
-                    + "(opcion 'Facturar un pedido pendiente')");
-            return;
-        }
-        if (enviarYFacturar(con, idPedido, true)) {
-            System.out.println(">> CADENA COMPLETADA CON EXITO");
-        } else {
-            System.out.println(">> El pedido " + idPedido + " queda 'Listo envio'");
-        }
+        System.out.println(">> Pedido " + idPedido + " LISTO PARA ENVIAR. Siguiente paso: "
+                + "Inventario > 'Validar un envio' y despues Ventas > 'Facturar un pedido enviado'");
     }
 
     // Se asegura de que hay stock para la linea: si falta, se compra al proveedor o se fabrica
@@ -879,13 +917,7 @@ public class Ventas {
     // Pedido de cliente que se queda esperando: de los productos que fabricamos se crea ya
     // la orden de fabricacion con las unidades que faltan (respetando a los pedidos mas antiguos)
     private static void crearOrdenesParaPedido(Connection con, int idPedido) throws SQLException {
-        // Un producto puede estar en varias lineas del pedido: se suman
-        java.util.Map<Integer, Linea> porProducto = new java.util.LinkedHashMap<>();
-        for (Linea l : cargarLineas(con, idPedido)) {
-            porProducto.merge(l.idProducto(), l, (a, b) ->
-                    new Linea(a.idProducto(), a.nombre(), a.precio(), a.cantidad() + b.cantidad()));
-        }
-        for (Linea l : porProducto.values()) {
+        for (Linea l : agruparPorProducto(cargarLineas(con, idPedido))) {
             if (!Inventario.seFabrica(con, l.idProducto())) continue;
             int faltan = l.cantidad() - disponible(con, l.idProducto(), idPedido);
             if (faltan > 0) Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), faltan);
