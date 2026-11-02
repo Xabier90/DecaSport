@@ -28,6 +28,41 @@ public class Ventas {
             if (!hay) System.out.println("No hay clientes");
         }
     }
+
+    // CRM: da de alta un cliente (un contacto, sin usuario para entrar en el programa)
+    public static void crearCliente(Connection con) throws SQLException {
+        if (!Usuarios.exigir("crm")) return;
+        System.out.print("Nombre completo: ");
+        String nombre = Utilidades.leerLinea().trim();
+        if (nombre.isEmpty()) {
+            System.out.println("El nombre es obligatorio");
+            return;
+        }
+        System.out.print("Email (opcional): ");
+        String email = Utilidades.leerLinea().trim();
+        System.out.print("Telefono (opcional): ");
+        String telefono = Utilidades.leerLinea().trim();
+        System.out.print("Pais (opcional): ");
+        String pais = Utilidades.leerLinea().trim();
+        if (telefono.length() > 20 || nombre.length() > 100 || email.length() > 100 || pais.length() > 50) {
+            System.out.println("Algun dato es demasiado largo. No se ha creado el cliente");
+            return;
+        }
+
+        try (PreparedStatement ps = con.prepareStatement(
+                "INSERT INTO clientes (nombre, email, telefono, pais) VALUES (?, ?, ?, ?) RETURNING id_cliente")) {
+            ps.setString(1, nombre);
+            ps.setString(2, email.isEmpty() ? null : email);
+            ps.setString(3, telefono.isEmpty() ? null : telefono);
+            ps.setString(4, pais.isEmpty() ? null : pais);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                System.out.println("Cliente creado con el ID " + rs.getInt(1)
+                        + ". Ya le puedes hacer oportunidades de venta");
+            }
+        }
+    }
+
     // Borra un cliente con sus pedidos, facturas, oportunidades y su usuario (CRM o administrador)
     public static void borrarCliente(Connection con) throws SQLException {
         if (!Usuarios.exigir("crm")) return;
@@ -103,10 +138,9 @@ public class Ventas {
 
     public static void verPedidos(Connection con) throws SQLException {
         String sql = "SELECT p.id_pedido, c.nombre, p.fecha, COALESCE(p.estado, '-'), "
-                   + "COALESCE(SUM(l.cantidad * pr.precio), 0) "
+                   + "COALESCE(SUM(l.cantidad * l.precio), 0) "
                    + "FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
                    + "LEFT JOIN lineas_pedido l ON l.id_pedido = p.id_pedido "
-                   + "LEFT JOIN productos pr ON pr.id_producto = l.id_producto "
                    + "GROUP BY p.id_pedido, c.nombre ORDER BY p.id_pedido";
         try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             System.out.println("\n--- PEDIDOS DE VENTA ---");
@@ -142,7 +176,9 @@ public class Ventas {
 
     // Con soloAbiertas=true solo salen las que esperan respuesta del cliente
     private static boolean listarOportunidades(Connection con, boolean soloAbiertas) throws SQLException {
-        String sql = "SELECT o.id_oportunidad, c.nombre, p.nombre, o.cantidad, o.cantidad * p.precio, "
+        // Si ya es un pedido se muestra el precio con el que se vendio; si no, el precio actual
+        String sql = "SELECT o.id_oportunidad, c.nombre, p.nombre, o.cantidad, o.cantidad * COALESCE("
+                   + "(SELECT l.precio FROM lineas_pedido l WHERE l.id_pedido = o.id_pedido LIMIT 1), p.precio), "
                    + "COALESCE(u.nombre_usuario, '-'), o.fecha, o.estado, o.id_pedido "
                    + "FROM oportunidades o JOIN clientes c ON c.id_cliente = o.id_cliente "
                    + "JOIN productos p ON p.id_producto = o.id_producto "
@@ -173,10 +209,9 @@ public class Ventas {
     public static void facturarPedido(Connection con) throws SQLException {
         if (!Usuarios.exigir("ventas")) return;
         String sql = "SELECT p.id_pedido, c.nombre, p.fecha, p.estado, "
-                   + "COALESCE(SUM(l.cantidad * pr.precio), 0) "
+                   + "COALESCE(SUM(l.cantidad * l.precio), 0) "
                    + "FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
                    + "LEFT JOIN lineas_pedido l ON l.id_pedido = p.id_pedido "
-                   + "LEFT JOIN productos pr ON pr.id_producto = l.id_producto "
                    + "WHERE p.estado IN ('pendiente', 'Listo envio') "
                    + "AND NOT EXISTS (SELECT 1 FROM facturas f WHERE f.id_pedido = p.id_pedido) "
                    + "GROUP BY p.id_pedido, c.nombre ORDER BY p.id_pedido";
@@ -369,10 +404,11 @@ public class Ventas {
             }
             for (Linea l : carrito) {
                 try (PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO lineas_pedido (id_pedido, id_producto, cantidad) VALUES (?, ?, ?)")) {
+                        "INSERT INTO lineas_pedido (id_pedido, id_producto, cantidad, precio) VALUES (?, ?, ?, ?)")) {
                     ps.setInt(1, idPedido);
                     ps.setInt(2, l.idProducto());
                     ps.setInt(3, l.cantidad());
+                    ps.setDouble(4, l.precio());
                     ps.executeUpdate();
                 }
             }
@@ -555,7 +591,7 @@ public class Ventas {
     private static void mostrarPedidosDeCliente(Connection con, int idCliente, boolean soloEnEspera) throws SQLException {
         String sql = "SELECT pe.id_pedido, pe.fecha, pe.estado, "
                    + "(SELECT MIN(f.id_factura) FROM facturas f WHERE f.id_pedido = pe.id_pedido), "
-                   + "pr.nombre, l.cantidad, l.cantidad * pr.precio "
+                   + "pr.nombre, l.cantidad, l.cantidad * l.precio "
                    + "FROM pedidos pe JOIN lineas_pedido l ON l.id_pedido = pe.id_pedido "
                    + "JOIN productos pr ON pr.id_producto = l.id_producto "
                    + "WHERE pe.id_cliente = ? " + (soloEnEspera ? "AND pe.estado = ? " : "")
@@ -740,8 +776,9 @@ public class Ventas {
                 }
             }
             try (PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO lineas_pedido (id_pedido, id_producto, cantidad) "
-                    + "SELECT ?, id_producto, cantidad FROM oportunidades WHERE id_oportunidad = ?")) {
+                    "INSERT INTO lineas_pedido (id_pedido, id_producto, cantidad, precio) "
+                    + "SELECT ?, o.id_producto, o.cantidad, p.precio FROM oportunidades o "
+                    + "JOIN productos p ON p.id_producto = o.id_producto WHERE o.id_oportunidad = ?")) {
                 ps.setInt(1, idPedido);
                 ps.setInt(2, idOportunidad);
                 ps.executeUpdate();
@@ -854,7 +891,7 @@ public class Ventas {
     private static List<Linea> cargarLineas(Connection con, int idPedido) throws SQLException {
         List<Linea> lineas = new ArrayList<>();
         try (PreparedStatement ps = con.prepareStatement(
-                "SELECT l.id_producto, p.nombre, p.precio, l.cantidad FROM lineas_pedido l "
+                "SELECT l.id_producto, p.nombre, l.precio, l.cantidad FROM lineas_pedido l "
                 + "JOIN productos p ON p.id_producto = l.id_producto WHERE l.id_pedido = ? ORDER BY l.id_producto")) {
             ps.setInt(1, idPedido);
             try (ResultSet rs = ps.executeQuery()) {

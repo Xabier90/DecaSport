@@ -57,7 +57,15 @@ public class Main {
             // Una orden puede ser para un pedido o para tener stock (sin pedido), y de varias unidades
             "ALTER TABLE fabricacion ALTER COLUMN id_pedido DROP NOT NULL",
             "ALTER TABLE fabricacion ADD COLUMN IF NOT EXISTS cantidad INTEGER NOT NULL DEFAULT 1 CHECK (cantidad > 0)",
-            "ALTER TABLE fabricacion ALTER COLUMN estado SET DEFAULT 'Pendiente'"
+            "ALTER TABLE fabricacion ALTER COLUMN estado SET DEFAULT 'Pendiente'",
+
+            // Cada linea guarda el precio con el que se vendio: si luego cambia el precio del
+            // producto, los pedidos y facturas antiguos no cambian. Las lineas que ya existian
+            // se rellenan con el precio actual
+            "ALTER TABLE lineas_pedido ADD COLUMN IF NOT EXISTS precio NUMERIC(10,2)",
+            "UPDATE lineas_pedido l SET precio = p.precio FROM productos p "
+                + "WHERE p.id_producto = l.id_producto AND l.precio IS NULL",
+            "ALTER TABLE lineas_pedido ALTER COLUMN precio SET NOT NULL"
         };
         try (Statement st = con.createStatement()) {
             for (String s : sentencias) st.execute(s);
@@ -195,24 +203,26 @@ public class Main {
             titulo(tituloDepartamento("CRM"));
             seccion("CLIENTES");
             opcion(1, "Ver clientes");
-            opcion(2, "Ver lo que ha comprado cada cliente");
-            opcion(3, "Borrar un cliente");
+            opcion(2, "Crear un cliente");
+            opcion(3, "Ver lo que ha comprado cada cliente");
+            opcion(4, "Borrar un cliente");
             seccion("OPORTUNIDADES DE VENTA");
-            opcion(4, "Ver oportunidades");
-            opcion(5, "Crear una oportunidad (lanza pedido, compra/fabricacion y factura)");
-            opcion(6, "Responder a una oportunidad abierta");
+            opcion(5, "Ver oportunidades");
+            opcion(6, "Crear una oportunidad (lanza pedido, compra/fabricacion y factura)");
+            opcion(7, "Responder a una oportunidad abierta");
             seccion("INFORMES");
-            opcion(7, "Informe de CRM");
+            opcion(8, "Informe de CRM");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
                     case 1 -> Ventas.verClientes(con);
-                    case 2 -> Ventas.verComprasDeClientes(con);
-                    case 3 -> Ventas.borrarCliente(con);
-                    case 4 -> Ventas.verOportunidades(con);
-                    case 5 -> Ventas.crearOportunidad(con);
-                    case 6 -> Ventas.responderOportunidad(con);
-                    case 7 -> Informes.informeCrm(con);
+                    case 2 -> Ventas.crearCliente(con);
+                    case 3 -> Ventas.verComprasDeClientes(con);
+                    case 4 -> Ventas.borrarCliente(con);
+                    case 5 -> Ventas.verOportunidades(con);
+                    case 6 -> Ventas.crearOportunidad(con);
+                    case 7 -> Ventas.responderOportunidad(con);
+                    case 8 -> Informes.informeCrm(con);
                     case 0 -> {
                         return;
                     }
@@ -337,6 +347,12 @@ public class Main {
 
     // FABRICACION: ordenes de montaje en el taller
     private static void menuFabricacion(Connection con) {
+        // Nada mas entrar se avisa de los productos que hay que montar para pedidos
+        try {
+            Inventario.avisarFaltaFabricar(con);
+        } catch (SQLException e) {
+            System.out.println("Error en la base de datos: " + e.getMessage());
+        }
         while (true) {
             titulo(tituloDepartamento("FABRICACION"));
             seccion("ORDENES DE FABRICACION");

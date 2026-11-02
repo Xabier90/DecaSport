@@ -259,7 +259,7 @@ public class Informes {
 
     // 3. Los 5 productos con mas unidades pedidas
     private static void productosMasVendidos(Connection con) throws SQLException {
-        String sql = "SELECT p.nombre, SUM(l.cantidad) AS unidades, SUM(l.cantidad * p.precio) AS importe "
+        String sql = "SELECT p.nombre, SUM(l.cantidad) AS unidades, SUM(l.cantidad * l.precio) AS importe "
                    + "FROM lineas_pedido l JOIN productos p ON p.id_producto = l.id_producto "
                    + "JOIN pedidos pe ON pe.id_pedido = l.id_pedido WHERE pe.estado <> 'Cancelado' "
                    + "GROUP BY p.id_producto, p.nombre ORDER BY unidades DESC LIMIT 5";

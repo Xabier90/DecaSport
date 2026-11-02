@@ -238,6 +238,48 @@ public class Inventario {
         }
     }
 
+    // Productos que fabricamos y no llegan para los pedidos sin enviar, descontando
+    // lo que ya esta en ordenes de fabricacion abiertas.
+    // Columnas: id, nombre, unidades que faltan, unidades que se pueden montar ya con las piezas
+    private static final String SQL_PRODUCTOS_A_FABRICAR =
+            "SELECT * FROM (SELECT p.id_producto, p.nombre, "
+            + RESERVADO_DE_P + " - " + STOCK_DE_P + " - COALESCE((SELECT SUM(f.cantidad) FROM fabricacion f "
+            + "WHERE f.id_producto = p.id_producto AND f.estado NOT IN ('Terminada', 'Cancelada')), 0) AS faltan, "
+            + "(SELECT MIN(cf.stock_actual / cf.cantidad_necesaria) FROM componentes_fabricacion cf "
+            + "WHERE cf.id_producto = p.id_producto) AS montables "
+            + "FROM productos p WHERE EXISTS "
+            + "(SELECT 1 FROM componentes_fabricacion cf WHERE cf.id_producto = p.id_producto)) t "
+            + "WHERE faltan > 0 ORDER BY id_producto";
+
+    // Al entrar en Fabricacion: avisa de lo que hay que montar para pedidos y pregunta si se crean las ordenes
+    public static void avisarFaltaFabricar(Connection con) throws SQLException {
+        List<int[]> aFabricar = new ArrayList<>();   // {id, unidades que faltan}
+        List<String> nombres = new ArrayList<>();
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(SQL_PRODUCTOS_A_FABRICAR)) {
+            while (rs.next()) {
+                aFabricar.add(new int[]{rs.getInt(1), rs.getInt(3)});
+                nombres.add(rs.getString(2));
+            }
+        }
+        if (aFabricar.isEmpty()) return;
+        System.out.println("\n!! AVISO: hay " + aFabricar.size() + " producto(s) que hay que fabricar para pedidos:");
+        for (int i = 0; i < aFabricar.size(); i++) {
+            System.out.println("   - " + nombres.get(i) + " -> FALTAN " + aFabricar.get(i)[1] + " para pedidos sin enviar");
+        }
+        if (!Utilidades.preguntarSiNo("Quieres crear las ordenes de fabricacion ahora?")) return;
+        for (int i = 0; i < aFabricar.size(); i++) {
+            int idProducto = aFabricar.get(i)[0];
+            int faltan = aFabricar.get(i)[1];
+            if (!Utilidades.preguntarSiNo("Crear una orden de " + faltan + " x '" + nombres.get(i) + "'?")) continue;
+            if (!piezasSuficientes(con, idProducto, faltan)) {
+                System.out.println("Aviso: la orden se crea, pero no se podra terminar hasta que lleguen las piezas");
+            }
+            int id = crearOrden(con, null, idProducto, faltan);
+            System.out.println("[FABRICACION] Orden " + id + " creada: " + faltan + " unidad(es) (estado: Pendiente). "
+                    + "Terminala en 'Terminar una orden'");
+        }
+    }
+
     // FABRICACION: piezas que lleva un producto y cuantas unidades se pueden montar
     public static void verPiezasDeProducto(Connection con) throws SQLException {
         if (!listarProductosFabricables(con)) return;
