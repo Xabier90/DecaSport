@@ -334,35 +334,6 @@ public class Ventas {
         }
     }
 
-    // Pedidos de la cadena del CRM que se quedaron a medias: se sigue donde se paro
-    public static void reanudarPedido(Connection con) throws SQLException {
-        if (!Usuarios.exigir("ventas")) return;
-        String sql = "SELECT p.id_pedido, c.nombre, p.fecha, p.estado FROM pedidos p "
-                   + "JOIN clientes c ON c.id_cliente = p.id_cliente "
-                   + "WHERE p.estado IN ('Confirmado', 'Falta material') "
-                   + "ORDER BY p.id_pedido";
-        List<Integer> ids = new ArrayList<>();
-        System.out.println("\n--- PEDIDOS PARADOS ---");
-        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                ids.add(rs.getInt(1));
-                System.out.printf("Pedido %d | %s | %s | %s%n",
-                        rs.getInt(1), rs.getString(2), rs.getString(3), rs.getString(4));
-            }
-        }
-        if (ids.isEmpty()) {
-            System.out.println("No hay pedidos parados (los que estan 'En fabricacion' los termina Fabricacion)");
-            return;
-        }
-        int id = Utilidades.leerEntero("ID del pedido a reanudar (0 = cancelar): ");
-        if (id == 0) return;
-        if (!ids.contains(id)) {
-            System.out.println("Ese pedido no esta en la lista");
-            return;
-        }
-        continuarCadena(con, id);
-    }
-
     // ============================================================
     // PEDIDO DEL CLIENTE
     // ============================================================
@@ -454,16 +425,10 @@ public class Ventas {
                     ps.executeUpdate();
                 }
             }
-            // Si hay stock de todo se reserva ya; si no, el pedido se queda esperando
-            boolean servido = intentarServir(con, idPedido);
-            if (!servido) crearOrdenesParaPedido(con, idPedido);
+            // Mismo flujo que un pedido del CRM: se reserva o se lanza la compra/fabricacion
+            confirmarPedido(con, idPedido);
             con.commit();
-            if (servido) {
-                System.out.printf("Pedido %d realizado. Total: %.2f EUR%n", idPedido, total);
-            } else {
-                System.out.printf("Pedido %d guardado (%.2f EUR). Ahora no hay stock de todo:%n", idPedido, total);
-                System.out.println("se tramitara AUTOMATICAMENTE en cuanto llegue. Puedes verlo en 'Mis pedidos'");
-            }
+            System.out.printf("Pedido %d realizado. Total: %.2f EUR. Puedes seguirlo en 'Mis pedidos'%n", idPedido, total);
         } catch (SQLException e) {
             Utilidades.rollback(con);
             System.out.println("No se ha podido hacer el pedido: " + e.getMessage());
@@ -558,7 +523,7 @@ public class Ventas {
         }
     }
 
-    // CLIENTE: cancelar uno de sus pedidos que todavia espera stock (no se habia restado nada)
+    // CLIENTE: cancelar uno de sus pedidos que todavia espera material (no se habia restado nada)
     public static void cancelarPedidoEnEspera(Connection con) throws SQLException {
         int idCliente = obtenerIdCliente(con);
         if (idCliente == -1) {
@@ -575,7 +540,7 @@ public class Ventas {
             ps.setInt(2, idCliente);
             ps.setString(3, Inventario.ESPERANDO);
             if (ps.executeUpdate() == 0) {
-                System.out.println("Ese pedido no es tuyo o ya no esta esperando stock");
+                System.out.println("Ese pedido no es tuyo o ya no esta esperando material");
                 return;
             }
         }
@@ -625,7 +590,7 @@ public class Ventas {
                 hay = true;
                 System.out.printf("%d. %s (usuario: %s) | %d pedido(s) | %d unidad(es) | facturado: %.2f EUR%s%n",
                         rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4), rs.getInt(5), rs.getDouble(6),
-                        rs.getInt(7) > 0 ? " | " + rs.getInt(7) + " esperando stock" : "");
+                        rs.getInt(7) > 0 ? " | " + rs.getInt(7) + " esperando material" : "");
             }
         }
         if (!hay) {
@@ -654,7 +619,7 @@ public class Ventas {
             ps.setInt(1, idCliente);
             if (soloEnEspera) ps.setString(2, Inventario.ESPERANDO);
             try (ResultSet rs = ps.executeQuery()) {
-                System.out.println(soloEnEspera ? "\n--- PEDIDOS ESPERANDO STOCK ---" : "\n--- HISTORIAL DE PEDIDOS ---");
+                System.out.println(soloEnEspera ? "\n--- PEDIDOS ESPERANDO MATERIAL ---" : "\n--- HISTORIAL DE PEDIDOS ---");
                 int pedidoActual = -1;
                 double totalPedido = 0;
                 double totalCliente = 0;
@@ -673,7 +638,7 @@ public class Ventas {
                     if (!"Cancelado".equals(rs.getString(3))) totalCliente += rs.getDouble(7);
                 }
                 if (pedidoActual == -1) {
-                    System.out.println(soloEnEspera ? "No hay pedidos esperando stock" : "Todavia no hay pedidos");
+                    System.out.println(soloEnEspera ? "No hay pedidos esperando material" : "Todavia no hay pedidos");
                     return;
                 }
                 System.out.printf("      Total del pedido: %.2f EUR%n", totalPedido);
@@ -688,7 +653,7 @@ public class Ventas {
         return switch (estado) {
             case "Listo envio" -> "Preparado (pendiente de envio)";
             case "Enviado" -> "Enviado (pendiente de factura)";
-            case Inventario.ESPERANDO -> "Esperando stock (se tramitara automaticamente)";
+            case Inventario.ESPERANDO -> "Esperando material (se tramitara automaticamente)";
             case "Facturado" -> "Enviado y facturado";
             default -> estado;
         };
@@ -811,7 +776,7 @@ public class Ventas {
             System.out.println(">> El cliente RECHAZA la propuesta. Oportunidad cerrada");
         } else {
             int idPedido = aceptarOportunidad(con, idOportunidad);
-            if (idPedido > 0) continuarCadena(con, idPedido);
+            if (idPedido > 0) confirmarPedido(con, idPedido);
         }
     }
 
@@ -822,9 +787,10 @@ public class Ventas {
             int idPedido;
             try (PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO pedidos (id_cliente, fecha, estado) "
-                    + "SELECT id_cliente, CURRENT_DATE, 'Confirmado' FROM oportunidades WHERE id_oportunidad = ? "
+                    + "SELECT id_cliente, CURRENT_DATE, ? FROM oportunidades WHERE id_oportunidad = ? "
                     + "RETURNING id_pedido")) {
-                ps.setInt(1, idOportunidad);
+                ps.setString(1, Inventario.ESPERANDO);
+                ps.setInt(2, idOportunidad);
                 try (ResultSet rs = ps.executeQuery()) {
                     rs.next();
                     idPedido = rs.getInt(1);
@@ -858,70 +824,42 @@ public class Ventas {
     }
 
     // ============================================================
-    // CADENA AUTOMATICA: pedido -> stock -> (compra o fabricacion) -> envio -> factura
-    // Si se para (falta material), se puede reanudar despues y sigue donde se quedo
+    // CONFIRMAR UN PEDIDO: el mismo flujo para los del CRM y los de clientes (como en Odoo)
+    //   - hay stock libre de todo  -> 'Listo envio' (las unidades quedan reservadas)
+    //   - falta algo               -> 'Esperando material' y se lanza solo lo que falta:
+    //        producto que se compra   -> pedido de compra 'Pendiente' (Compras registra la llegada)
+    //        producto que se fabrica  -> orden de fabricacion (Fabricacion la empieza y la termina)
+    // Cuando entra stock, procesarPedidosEnEspera pasa a 'Listo envio' los que ya se pueden servir
     // ============================================================
-    private static void continuarCadena(Connection con, int idPedido) throws SQLException {
-        for (Linea l : cargarLineas(con, idPedido)) {
-            if (!conseguirStock(con, idPedido, l)) return;
+    private static void confirmarPedido(Connection con, int idPedido) throws SQLException {
+        if (intentarServir(con, idPedido)) {
+            System.out.println(">> Pedido " + idPedido + " LISTO PARA ENVIAR (hay stock de todo). Siguiente paso: "
+                    + "Inventario > 'Validar un envio' y despues Ventas > 'Facturar un pedido enviado'");
+            return;
         }
-        // Las unidades quedan reservadas: Inventario envia el pedido y despues Ventas lo factura
-        cambiarEstadoPedido(con, idPedido, "Listo envio");
-        System.out.println(">> Pedido " + idPedido + " LISTO PARA ENVIAR. Siguiente paso: "
-                + "Inventario > 'Validar un envio' y despues Ventas > 'Facturar un pedido enviado'");
-    }
-
-    // Se asegura de que hay stock para la linea: si falta, se compra al proveedor o se fabrica
-    private static boolean conseguirStock(Connection con, int idPedido, Linea l) throws SQLException {
-        // Lo reservado por pedidos mas antiguos sin enviar no se puede usar
-        int stock = disponible(con, l.idProducto(), idPedido);
-        if (stock >= l.cantidad()) {
-            System.out.println("[INVENTARIO] Hay stock suficiente de " + l.nombre()
-                    + " (disponibles " + stock + ", hacen falta " + l.cantidad() + ")");
-            return true;
-        }
-        int faltan = l.cantidad() - stock;
-        if (Inventario.seFabrica(con, l.idProducto())) {
-            System.out.println("[INVENTARIO] Stock insuficiente de " + l.nombre() + ": hay que fabricar " + faltan + " unidad(es)");
-            return fabricar(con, idPedido, l, faltan);
-        }
-
-        System.out.println("[INVENTARIO] Stock insuficiente de " + l.nombre() + " (disponibles " + stock
-                + ", hacen falta " + l.cantidad() + "): se pide al proveedor");
-        // Se repite por si el pedido de compra que ya estaba en camino no traia suficientes
-        while ((faltan = l.cantidad() - disponible(con, l.idProducto(), idPedido)) > 0) {
-            if (!Inventario.reponerProducto(con, l.idProducto(), faltan)) {
-                detenerCadena(con, idPedido, "Falta material", "Esperando al proveedor");
-                return false;
+        for (Linea l : agruparPorProducto(cargarLineas(con, idPedido))) {
+            int faltan = faltanParaPedido(con, l, idPedido);
+            if (faltan <= 0) continue;
+            if (Inventario.seFabrica(con, l.idProducto())) {
+                Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), faltan);
+            } else {
+                Inventario.pedirProductoParaPedido(con, l.idProducto(), l.nombre(), faltan);
             }
         }
-        System.out.println("[INVENTARIO] Material recibido: ya hay stock de " + l.nombre());
-        return true;
+        System.out.println(">> Pedido " + idPedido + " ESPERANDO MATERIAL. Pasara solo a 'Listo envio' cuando "
+                + "Compras registre la llegada o Fabricacion termine la orden");
+    }
+
+    // Unidades que hay que conseguir: lo que piden este pedido y los mas antiguos sin enviar,
+    // menos el stock y lo que ya viene en camino (compras u ordenes de fabricacion abiertas)
+    private static int faltanParaPedido(Connection con, Linea l, int idPedido) throws SQLException {
+        int demanda = reservadoAntesDe(con, l.idProducto(), idPedido) + l.cantidad();
+        return demanda - Inventario.stockTotal(con, l.idProducto()) - Inventario.enCamino(con, l.idProducto());
     }
 
     // Stock que puede usar el pedido: sus propias unidades no cuentan como reservadas
     private static int disponible(Connection con, int idProducto, int idPedido) throws SQLException {
         return Math.max(0, Inventario.stockTotal(con, idProducto) - reservadoAntesDe(con, idProducto, idPedido));
-    }
-
-    // Al aceptar la oportunidad se crea la orden de fabricacion (y se piden las piezas que falten).
-    // La cadena se para aqui: Fabricacion empieza y termina la orden, y al terminarla
-    // el pedido pasa solo a 'Listo envio'
-    private static boolean fabricar(Connection con, int idPedido, Linea l, int unidades) throws SQLException {
-        Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), unidades);
-        detenerCadena(con, idPedido, "En fabricacion",
-                "Fabricacion tiene que montar la orden (Fabricacion > 'Empezar' y 'Terminar una orden')");
-        return false;
-    }
-
-    // Pedido de cliente que se queda esperando: de los productos que fabricamos se crea ya
-    // la orden de fabricacion con las unidades que faltan (respetando a los pedidos mas antiguos)
-    private static void crearOrdenesParaPedido(Connection con, int idPedido) throws SQLException {
-        for (Linea l : agruparPorProducto(cargarLineas(con, idPedido))) {
-            if (!Inventario.seFabrica(con, l.idProducto())) continue;
-            int faltan = l.cantidad() - disponible(con, l.idProducto(), idPedido);
-            if (faltan > 0) Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), faltan);
-        }
     }
 
     private static List<Linea> cargarLineas(Connection con, int idPedido) throws SQLException {
@@ -937,19 +875,6 @@ public class Ventas {
             }
         }
         return lineas;
-    }
-
-    private static void detenerCadena(Connection con, int idPedido, String estado, String motivo) {
-        try {
-            cambiarEstadoPedido(con, idPedido, estado);
-        } catch (SQLException e) {
-            System.out.println("No se ha podido actualizar el pedido: " + e.getMessage());
-        }
-        System.out.println(">> Cadena detenida: " + motivo);
-        System.out.println("   El pedido " + idPedido + " queda como '" + estado + "'");
-        if ("Falta material".equals(estado)) {
-            System.out.println("   Cuando llegue el material, sigue con Ventas > 'Reanudar un pedido parado'");
-        }
     }
 
     private static void cambiarEstadoPedido(Connection con, int idPedido, String estado) throws SQLException {

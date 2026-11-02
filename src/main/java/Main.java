@@ -69,7 +69,12 @@ public class Main {
 
             // Antes los pedidos de clientes restaban el stock al tramitarse y quedaban 'pendiente'.
             // Ahora el stock se resta al enviar: esos pedidos ya lo habian restado, asi que son 'Enviado'
-            "UPDATE pedidos SET estado = 'Enviado' WHERE estado = 'pendiente'"
+            "UPDATE pedidos SET estado = 'Enviado' WHERE estado = 'pendiente'",
+
+            // Antes habia varios estados de espera; ahora todos los pedidos confirmados que esperan
+            // una compra o una fabricacion estan en 'Esperando material'
+            "UPDATE pedidos SET estado = '" + Inventario.ESPERANDO + "' "
+                + "WHERE estado IN ('Esperando stock', 'Falta material', 'En fabricacion', 'Confirmado')"
         };
         try (Statement st = con.createStatement()) {
             for (String s : sentencias) st.execute(s);
@@ -212,7 +217,7 @@ public class Main {
             opcion(4, "Borrar un cliente");
             seccion("OPORTUNIDADES DE VENTA");
             opcion(5, "Ver oportunidades");
-            opcion(6, "Crear una oportunidad (lanza pedido, compra/fabricacion y factura)");
+            opcion(6, "Crear una oportunidad (al aceptarla se crea el pedido y se lanza la compra o fabricacion)");
             opcion(7, "Responder a una oportunidad abierta");
             seccion("INFORMES");
             opcion(8, "Informe de CRM");
@@ -246,20 +251,18 @@ public class Main {
             opcion(1, "Ver pedidos de venta");
             opcion(2, "Ver lo que ha comprado cada cliente");
             opcion(3, "Facturar un pedido enviado");
-            opcion(4, "Reanudar un pedido parado (falta material)");
             seccion("FACTURAS");
-            opcion(5, "Ver facturas");
+            opcion(4, "Ver facturas");
             seccion("INFORMES");
-            opcion(6, "Informe de Ventas");
+            opcion(5, "Informe de Ventas");
             int op = pedirOpcion(textoSalida());
             try {
                 switch (op) {
                     case 1 -> Ventas.verPedidos(con);
                     case 2 -> Ventas.verComprasDeClientes(con);
                     case 3 -> Ventas.facturarPedido(con);
-                    case 4 -> Ventas.reanudarPedido(con);
-                    case 5 -> Ventas.verFacturas(con);
-                    case 6 -> Informes.informeVentas(con);
+                    case 4 -> Ventas.verFacturas(con);
+                    case 5 -> Informes.informeVentas(con);
                     case 0 -> {
                         return;
                     }
@@ -404,7 +407,7 @@ public class Main {
             opcion(1, "Ver catalogo de productos");
             opcion(2, "Hacer un pedido");
             opcion(3, "Mis pedidos");
-            opcion(4, "Cancelar un pedido que espera stock");
+            opcion(4, "Cancelar un pedido que espera material");
             int op = pedirOpcion("Cerrar sesion");
             try {
                 switch (op) {

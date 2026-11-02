@@ -12,13 +12,12 @@ public class Inventario {
     // Un componente de fabricacion (fila de componentes_fabricacion)
     public record Comp(int id, String nombre, int necesaria, int stock, Integer idProveedor) {}
 
-    // Estado de un pedido de cliente que espera a que llegue stock
-    public static final String ESPERANDO = "Esperando stock";
+    // Estado de un pedido confirmado (del CRM o de un cliente) que espera a que llegue
+    // lo que falta: una compra al proveedor o una orden de fabricacion
+    public static final String ESPERANDO = "Esperando material";
 
-    // Pedidos que cuentan con unidades que todavia no se han restado del stock:
-    // los de clientes que esperan stock y los del CRM que aun no se han enviado
-    public static final String ESTADOS_RESERVA =
-            "'" + ESPERANDO + "', 'Confirmado', 'Falta material', 'En fabricacion', 'Listo envio'";
+    // Pedidos que cuentan con unidades que todavia no se han restado del stock (no se han enviado)
+    public static final String ESTADOS_RESERVA = "'" + ESPERANDO + "', 'Listo envio'";
 
     // Subconsultas para un producto 'p': stock total y unidades reservadas por pedidos sin enviar
     private static final String STOCK_DE_P =
@@ -175,7 +174,9 @@ public class Inventario {
         }
 
         String sql = "SELECT cf.id_componente, p.nombre, cf.nombre, cf.stock_actual, cf.stock_minimo, "
-                   + "cf.stock_minimo - cf.stock_actual, COALESCE(pv.nombre, '(sin proveedor)') "
+                   + "cf.stock_minimo - cf.stock_actual, COALESCE(pv.nombre, '(sin proveedor)'), "
+                   + "(SELECT COALESCE(SUM(c.cantidad), 0) FROM compras c WHERE c.id_componente = cf.id_componente "
+                   + "AND c.estado IN ('Pendiente', 'Aceptada')) "
                    + "FROM componentes_fabricacion cf "
                    + "JOIN productos p ON p.id_producto = cf.id_producto "
                    + "LEFT JOIN proveedores pv ON pv.id_proveedor = cf.id_proveedor "
@@ -185,9 +186,10 @@ public class Inventario {
             System.out.println("\n--- PIEZAS DE FABRICACION BAJO MINIMO ---");
             while (rs.next()) {
                 hayPiezas = true;
-                System.out.printf("%d. [%s] %s | stock: %d | minimo: %d | faltan: %d | proveedor: %s%n",
+                System.out.printf("%d. [%s] %s | stock: %d | minimo: %d | faltan: %d | proveedor: %s%s%n",
                         rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4),
-                        rs.getInt(5), rs.getInt(6), rs.getString(7));
+                        rs.getInt(5), rs.getInt(6), rs.getString(7),
+                        rs.getInt(8) > 0 ? " | ya hay " + rs.getInt(8) + " en camino" : "");
             }
             if (!hayPiezas) System.out.println("Todas las piezas estan por encima del minimo");
         }
@@ -744,19 +746,30 @@ public class Inventario {
         return recibirCompra(con, idCompra);
     }
 
-    // Consigue 'cantidad' unidades de un producto que compramos hecho.
-    // Si ya hay un pedido de compra en camino se usa ese. True si el material ya esta en el almacen
-    public static boolean reponerProducto(Connection con, int idProducto, int cantidad) throws SQLException {
-        int idCompra = Utilidades.buscarId(con, "SELECT id_compra FROM compras WHERE id_producto = ? "
-                + "AND id_componente IS NULL AND estado IN ('Pendiente', 'Aceptada') ORDER BY id_compra LIMIT 1", idProducto);
-        if (idCompra > 0) {
-            System.out.println("[COMPRAS] Ya hay un pedido de compra en camino para este producto: " + idCompra);
-        } else {
-            idCompra = crearCompraProducto(con, idProducto, cantidad);
-            if (idCompra < 0) return false;
-            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado: " + cantidad + " unidad(es)");
+    // Pedido confirmado al que le falta un producto que compramos hecho: se crea solo el pedido
+    // de compra 'Pendiente' y Compras registra su llegada (como la regla "comprar bajo pedido" de Odoo)
+    public static void pedirProductoParaPedido(Connection con, int idProducto, String nombre, int cantidad)
+            throws SQLException {
+        if (Utilidades.buscarId(con, "SELECT COALESCE(id_proveedor, -1) FROM productos WHERE id_producto = ?",
+                idProducto) < 0) {
+            System.out.println("[COMPRAS] '" + nombre + "' no tiene proveedor asignado: Compras tiene que pedirlo "
+                    + "a mano (Compras > 'Crear un pedido de compra')");
+            return;
         }
-        return tramitarCompra(con, idCompra);
+        int idCompra = crearCompraProducto(con, idProducto, cantidad);
+        System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado automaticamente: " + cantidad + " x "
+                + nombre + " (Compras registra su llegada)");
+    }
+
+    // Unidades de un producto que ya vienen en camino: ordenes de fabricacion abiertas si lo
+    // fabricamos, o pedidos de compra sin recibir si lo compramos hecho
+    public static int enCamino(Connection con, int idProducto) throws SQLException {
+        String sql = seFabrica(con, idProducto)
+                ? "SELECT COALESCE(SUM(cantidad), 0) FROM fabricacion "
+                  + "WHERE id_producto = ? AND estado NOT IN ('Terminada', 'Cancelada')"
+                : "SELECT COALESCE(SUM(cantidad), 0) FROM compras "
+                  + "WHERE id_producto = ? AND id_componente IS NULL AND estado IN ('Pendiente', 'Aceptada')";
+        return Utilidades.buscarId(con, sql, idProducto);
     }
 
     // Despues de vender: si un producto que compramos hecho se ha quedado sin stock,
@@ -1070,17 +1083,7 @@ public class Inventario {
                 ps.setInt(1, idMontaje);
                 ps.executeUpdate();
             }
-            // Si era la ultima orden del pedido, el pedido queda listo para que Ventas lo envie y facture
-            try (PreparedStatement ps = con.prepareStatement(
-                    "UPDATE pedidos SET estado = 'Listo envio' WHERE estado = 'En fabricacion' "
-                    + "AND id_pedido = (SELECT id_pedido FROM fabricacion WHERE id_montaje = ?) "
-                    + "AND NOT EXISTS (SELECT 1 FROM fabricacion f WHERE f.id_pedido = pedidos.id_pedido "
-                    + "AND f.estado <> 'Terminada')")) {
-                ps.setInt(1, idMontaje);
-                if (ps.executeUpdate() > 0) {
-                    System.out.println("Todas las ordenes del pedido estan terminadas: el pedido queda 'Listo envio'");
-                }
-            }
+            // El pedido no se toca aqui: al volver, terminarOrdenMenu revisa los pedidos en espera
             con.commit();
             return true;
         } catch (SQLException e) {

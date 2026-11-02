@@ -75,12 +75,12 @@ public class Informes {
         tabla(con, "PEDIDOS POR ESTADO",
                 "SELECT COALESCE(estado, '-') AS estado, COUNT(*) AS pedidos FROM pedidos GROUP BY 1 ORDER BY 2 DESC",
                 "Todavia no hay pedidos");
-        tabla(con, "PEDIDOS DE CLIENTES ESPERANDO STOCK",
+        tabla(con, "PEDIDOS ESPERANDO MATERIAL",
                 "SELECT p.id_pedido AS pedido, c.nombre AS cliente, p.fecha, pr.nombre AS producto, "
                 + "l.cantidad AS pedidas FROM pedidos p JOIN clientes c ON c.id_cliente = p.id_cliente "
                 + "JOIN lineas_pedido l ON l.id_pedido = p.id_pedido JOIN productos pr ON pr.id_producto = l.id_producto "
                 + "WHERE p.estado = '" + Inventario.ESPERANDO + "' ORDER BY p.id_pedido",
-                "No hay pedidos esperando stock");
+                "No hay pedidos esperando material");
         tabla(con, "TOP 5 CLIENTES POR FACTURACION",
                 "SELECT c.nombre AS cliente, COUNT(f.id_factura) AS facturas, ROUND(SUM(f.total)::numeric, 2) AS total_eur "
                 + "FROM facturas f JOIN pedidos p ON p.id_pedido = f.id_pedido "
@@ -170,7 +170,9 @@ public class Informes {
                 "SELECT COALESCE(tipo, '-') AS tipo, COUNT(*) AS ordenes FROM fabricacion GROUP BY 1 ORDER BY 2 DESC",
                 "Todavia no hay ordenes de fabricacion");
         tabla(con, "PEDIDOS ESPERANDO A FABRICACION",
-                "SELECT id_pedido, fecha, estado FROM pedidos WHERE estado = 'En fabricacion' ORDER BY id_pedido",
+                "SELECT DISTINCT p.id_pedido, p.fecha, f.id_montaje AS orden, f.estado AS estado_orden FROM pedidos p "
+                + "JOIN fabricacion f ON f.id_pedido = p.id_pedido WHERE p.estado = '" + Inventario.ESPERANDO + "' "
+                + "AND f.estado NOT IN ('Terminada', 'Cancelada') ORDER BY p.id_pedido",
                 "No hay pedidos esperando");
         pie();
     }
