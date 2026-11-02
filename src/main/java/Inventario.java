@@ -15,12 +15,17 @@ public class Inventario {
     // Estado de un pedido de cliente que espera a que llegue stock
     public static final String ESPERANDO = "Esperando stock";
 
-    // Subconsultas para un producto 'p': stock total y unidades que esperan los pedidos de clientes
+    // Pedidos que cuentan con unidades que todavia no se han restado del stock:
+    // los de clientes que esperan stock y los del CRM que aun no se han enviado
+    public static final String ESTADOS_RESERVA =
+            "'" + ESPERANDO + "', 'Confirmado', 'Falta material', 'En fabricacion', 'Listo envio'";
+
+    // Subconsultas para un producto 'p': stock total y unidades reservadas por pedidos sin enviar
     private static final String STOCK_DE_P =
             "COALESCE((SELECT SUM(s.cantidad) FROM stock s WHERE s.id_producto = p.id_producto), 0)";
     private static final String RESERVADO_DE_P =
             "COALESCE((SELECT SUM(l.cantidad) FROM lineas_pedido l JOIN pedidos pe ON pe.id_pedido = l.id_pedido "
-            + "WHERE pe.estado = '" + ESPERANDO + "' AND l.id_producto = p.id_producto), 0)";
+            + "WHERE pe.estado IN (" + ESTADOS_RESERVA + ") AND l.id_producto = p.id_producto), 0)";
 
     // ============================================================
     // VER DATOS
@@ -37,7 +42,7 @@ public class Inventario {
                 int reservado = rs.getInt(6);
                 String estado;
                 if (stock == 0 && reservado == 0) estado = "AGOTADO (se puede reservar)";
-                else if (reservado > 0) estado = "stock: " + stock + " | reservadas para pedidos en espera: " + reservado;
+                else if (reservado > 0) estado = "stock: " + stock + " | reservadas para pedidos sin enviar: " + reservado;
                 else estado = "stock: " + stock;
                 System.out.printf("%d. %s (%s) - %.2f EUR - %s%n",
                         rs.getInt(1), rs.getString(2), rs.getString(3), rs.getDouble(4), estado);
@@ -46,11 +51,11 @@ public class Inventario {
         }
     }
 
-    // Unidades de un producto que esperan los pedidos de clientes sin stock
+    // Unidades de un producto reservadas por pedidos que todavia no se han enviado
     public static int reservado(Connection con, int idProducto) throws SQLException {
         return Utilidades.buscarId(con, "SELECT COALESCE(SUM(l.cantidad), 0) FROM lineas_pedido l "
                 + "JOIN pedidos pe ON pe.id_pedido = l.id_pedido "
-                + "WHERE pe.estado = '" + ESPERANDO + "' AND l.id_producto = ?", idProducto);
+                + "WHERE pe.estado IN (" + ESTADOS_RESERVA + ") AND l.id_producto = ?", idProducto);
     }
 
     public static void verComponentes(Connection con) throws SQLException {
@@ -147,7 +152,7 @@ public class Inventario {
                 int faltan = rs.getInt(5) - rs.getInt(3);
                 System.out.printf("%d. %s | en stock: %d | se pueden montar ya: %d%s%n",
                         rs.getInt(1), rs.getString(2), rs.getInt(3), rs.getInt(4),
-                        faltan > 0 ? " | FALTAN " + faltan + " para pedidos de clientes en espera" : "");
+                        faltan > 0 ? " | FALTAN " + faltan + " para pedidos sin enviar" : "");
             }
         }
         if (!hay) System.out.println("Ningun producto tiene piezas definidas (las define Inventario en 'Anadir un componente')");
@@ -205,7 +210,7 @@ public class Inventario {
 
     private static String motivo(int stock, int reservado) {
         if (reservado > stock) {
-            return "FALTAN " + (reservado - stock) + " para pedidos de clientes en espera";
+            return "FALTAN " + (reservado - stock) + " para pedidos sin enviar";
         }
         return "AGOTADO";
     }

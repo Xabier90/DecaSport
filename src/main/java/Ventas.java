@@ -408,7 +408,7 @@ public class Ventas {
     // ============================================================
 
     // Usar dentro de una transaccion. Si hay stock para todo el pedido (respetando a los pedidos
-    // que llevan mas tiempo esperando), resta el stock y lo deja 'pendiente' de facturar
+    // mas antiguos sin enviar, tambien los del CRM), resta el stock y lo deja 'pendiente' de facturar
     private static boolean intentarServir(Connection con, int idPedido) throws SQLException {
         List<Linea> lineas = cargarLineas(con, idPedido);
         for (Linea l : lineas) {
@@ -426,15 +426,16 @@ public class Ventas {
         return true;
     }
 
-    // Unidades del producto que esperan los pedidos en espera mas antiguos que este
+    // Unidades del producto reservadas por pedidos sin enviar mas antiguos que este
+    // (de clientes o del CRM): se sirven por orden de llegada
     private static int reservadoAntesDe(Connection con, int idProducto, int idPedido) throws SQLException {
         try (PreparedStatement ps = con.prepareStatement(
                 "SELECT COALESCE(SUM(l.cantidad), 0) FROM lineas_pedido l "
                 + "JOIN pedidos pe ON pe.id_pedido = l.id_pedido "
-                + "WHERE pe.estado = ? AND l.id_producto = ? AND pe.id_pedido < ?")) {
-            ps.setString(1, Inventario.ESPERANDO);
-            ps.setInt(2, idProducto);
-            ps.setInt(3, idPedido);
+                + "WHERE pe.estado IN (" + Inventario.ESTADOS_RESERVA + ") "
+                + "AND l.id_producto = ? AND pe.id_pedido < ?")) {
+            ps.setInt(1, idProducto);
+            ps.setInt(2, idPedido);
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getInt(1);
@@ -787,8 +788,8 @@ public class Ventas {
 
     // Se asegura de que hay stock para la linea: si falta, se compra al proveedor o se fabrica
     private static boolean conseguirStock(Connection con, int idPedido, Linea l) throws SQLException {
-        // Lo reservado por pedidos de clientes que esperan stock no se puede usar
-        int stock = disponible(con, l.idProducto());
+        // Lo reservado por pedidos mas antiguos sin enviar no se puede usar
+        int stock = disponible(con, l.idProducto(), idPedido);
         if (stock >= l.cantidad()) {
             System.out.println("[INVENTARIO] Hay stock suficiente de " + l.nombre()
                     + " (disponibles " + stock + ", hacen falta " + l.cantidad() + ")");
@@ -803,7 +804,7 @@ public class Ventas {
         System.out.println("[INVENTARIO] Stock insuficiente de " + l.nombre() + " (disponibles " + stock
                 + ", hacen falta " + l.cantidad() + "): se pide al proveedor");
         // Se repite por si el pedido de compra que ya estaba en camino no traia suficientes
-        while ((faltan = l.cantidad() - disponible(con, l.idProducto())) > 0) {
+        while ((faltan = l.cantidad() - disponible(con, l.idProducto(), idPedido)) > 0) {
             if (!Inventario.reponerProducto(con, l.idProducto(), faltan)) {
                 detenerCadena(con, idPedido, "Falta material", "Esperando al proveedor");
                 return false;
@@ -813,8 +814,9 @@ public class Ventas {
         return true;
     }
 
-    private static int disponible(Connection con, int idProducto) throws SQLException {
-        return Math.max(0, Inventario.stockTotal(con, idProducto) - Inventario.reservado(con, idProducto));
+    // Stock que puede usar el pedido: sus propias unidades no cuentan como reservadas
+    private static int disponible(Connection con, int idProducto, int idPedido) throws SQLException {
+        return Math.max(0, Inventario.stockTotal(con, idProducto) - reservadoAntesDe(con, idProducto, idPedido));
     }
 
     // Compra las piezas que falten, crea las ordenes de fabricacion y las termina
