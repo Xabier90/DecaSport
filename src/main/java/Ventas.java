@@ -414,6 +414,7 @@ public class Ventas {
             }
             // Si hay stock de todo se reserva ya; si no, el pedido se queda esperando
             boolean servido = intentarServir(con, idPedido);
+            if (!servido) crearOrdenesParaPedido(con, idPedido);
             con.commit();
             if (servido) {
                 System.out.printf("Pedido %d realizado. Total: %.2f EUR%n", idPedido, total);
@@ -529,9 +530,18 @@ public class Ventas {
             ps.setInt(1, id);
             ps.setInt(2, idCliente);
             ps.setString(3, Inventario.ESPERANDO);
-            System.out.println(ps.executeUpdate() > 0 ? "Pedido " + id + " cancelado"
-                    : "Ese pedido no es tuyo o ya no esta esperando stock");
+            if (ps.executeUpdate() == 0) {
+                System.out.println("Ese pedido no es tuyo o ya no esta esperando stock");
+                return;
+            }
         }
+        // Lo que se iba a fabricar para este pedido ya no hace falta
+        try (PreparedStatement ps = con.prepareStatement("UPDATE fabricacion SET estado = 'Cancelada' "
+                + "WHERE id_pedido = ? AND estado NOT IN ('Terminada', 'Cancelada')")) {
+            ps.setInt(1, id);
+            ps.executeUpdate();
+        }
+        System.out.println("Pedido " + id + " cancelado");
     }
 
     // ============================================================
@@ -856,36 +866,30 @@ public class Ventas {
         return Math.max(0, Inventario.stockTotal(con, idProducto) - reservadoAntesDe(con, idProducto, idPedido));
     }
 
-    // Compra las piezas que falten, crea las ordenes de fabricacion y las termina
+    // Al aceptar la oportunidad se crea la orden de fabricacion (y se piden las piezas que falten).
+    // La cadena se para aqui: Fabricacion empieza y termina la orden, y al terminarla
+    // el pedido pasa solo a 'Listo envio'
     private static boolean fabricar(Connection con, int idPedido, Linea l, int unidades) throws SQLException {
-        for (Inventario.Comp c : Inventario.cargarComponentes(con, l.idProducto(), false)) {
-            int necesario = c.necesaria() * unidades;
-            int deficit;
-            while ((deficit = necesario - Inventario.stockComponente(con, c.id())) > 0) {
-                System.out.println("[COMPRAS] Falta pieza: " + c.nombre() + " (hacen falta " + necesario
-                        + ", faltan " + deficit + ")");
-                if (!Inventario.reponerComponente(con, c, deficit)) {
-                    detenerCadena(con, idPedido, "Falta material", "Esperando piezas del proveedor");
-                    return false;
-                }
-            }
-            System.out.println("[INVENTARIO] Pieza suficiente: " + c.nombre() + " (hacen falta " + necesario + ")");
-        }
+        Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), unidades);
+        detenerCadena(con, idPedido, "En fabricacion",
+                "Fabricacion tiene que montar la orden (Fabricacion > 'Empezar' y 'Terminar una orden')");
+        return false;
+    }
 
-        cambiarEstadoPedido(con, idPedido, "En fabricacion");
-        int idOrden = Inventario.crearOrden(con, idPedido, l.idProducto(), unidades);
-        System.out.println("[FABRICACION] Orden de fabricacion " + idOrden + " creada: " + unidades + " x " + l.nombre());
-        if (!Utilidades.preguntarSiNo("   Se han TERMINADO de montar las " + unidades + " unidad(es)?")) {
-            detenerCadena(con, idPedido, "En fabricacion",
-                    "Fabricacion en proceso (termina la orden " + idOrden + " en Fabricacion > 'Terminar una orden')");
-            return false;
+    // Pedido de cliente que se queda esperando: de los productos que fabricamos se crea ya
+    // la orden de fabricacion con las unidades que faltan (respetando a los pedidos mas antiguos)
+    private static void crearOrdenesParaPedido(Connection con, int idPedido) throws SQLException {
+        // Un producto puede estar en varias lineas del pedido: se suman
+        java.util.Map<Integer, Linea> porProducto = new java.util.LinkedHashMap<>();
+        for (Linea l : cargarLineas(con, idPedido)) {
+            porProducto.merge(l.idProducto(), l, (a, b) ->
+                    new Linea(a.idProducto(), a.nombre(), a.precio(), a.cantidad() + b.cantidad()));
         }
-        if (!Inventario.terminarMontaje(con, idOrden)) {
-            detenerCadena(con, idPedido, "En fabricacion", "No se pudo terminar la orden de fabricacion");
-            return false;
+        for (Linea l : porProducto.values()) {
+            if (!Inventario.seFabrica(con, l.idProducto())) continue;
+            int faltan = l.cantidad() - disponible(con, l.idProducto(), idPedido);
+            if (faltan > 0) Inventario.crearOrdenParaPedido(con, idPedido, l.idProducto(), l.nombre(), faltan);
         }
-        System.out.println("[FABRICACION] Orden terminada. Stock actualizado");
-        return true;
     }
 
     private static List<Linea> cargarLineas(Connection con, int idPedido) throws SQLException {

@@ -345,21 +345,21 @@ public class Main {
         }
     }
 
-    // FABRICACION: ordenes de montaje en el taller
+    // FABRICACION: monta las ordenes que se crean solas al confirmarse los pedidos
     private static void menuFabricacion(Connection con) {
-        // Nada mas entrar se avisa de los productos que hay que montar para pedidos
+        // Nada mas entrar se avisa de las ordenes que estan sin terminar
         try {
-            Inventario.avisarFaltaFabricar(con);
+            Inventario.avisarOrdenesAbiertas(con);
         } catch (SQLException e) {
             System.out.println("Error en la base de datos: " + e.getMessage());
         }
         while (true) {
             titulo(tituloDepartamento("FABRICACION"));
-            seccion("ORDENES DE FABRICACION");
+            seccion("ORDENES DE FABRICACION (se crean solas al confirmarse un pedido)");
             opcion(1, "Ver ordenes de fabricacion");
-            opcion(2, "Crear una orden de fabricacion (para stock)");
+            opcion(2, "Empezar una orden (Pendiente -> En proceso)");
             opcion(3, "Terminar una orden (gasta piezas y suma el producto al stock)");
-            opcion(4, "Cancelar una orden");
+            opcion(4, "Cancelar una orden para stock");
             seccion("PIEZAS");
             opcion(5, "Ver las piezas de un producto y cuantos se pueden montar");
             seccion("INFORMES");
@@ -368,7 +368,7 @@ public class Main {
             try {
                 switch (op) {
                     case 1 -> Inventario.verFabricacion(con);
-                    case 2 -> Inventario.crearOrdenMenu(con);
+                    case 2 -> Inventario.empezarOrdenMenu(con);
                     case 3 -> Inventario.terminarOrdenMenu(con);
                     case 4 -> Inventario.cancelarOrdenMenu(con);
                     case 5 -> Inventario.verPiezasDeProducto(con);

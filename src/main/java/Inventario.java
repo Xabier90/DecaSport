@@ -238,48 +238,6 @@ public class Inventario {
         }
     }
 
-    // Productos que fabricamos y no llegan para los pedidos sin enviar, descontando
-    // lo que ya esta en ordenes de fabricacion abiertas.
-    // Columnas: id, nombre, unidades que faltan, unidades que se pueden montar ya con las piezas
-    private static final String SQL_PRODUCTOS_A_FABRICAR =
-            "SELECT * FROM (SELECT p.id_producto, p.nombre, "
-            + RESERVADO_DE_P + " - " + STOCK_DE_P + " - COALESCE((SELECT SUM(f.cantidad) FROM fabricacion f "
-            + "WHERE f.id_producto = p.id_producto AND f.estado NOT IN ('Terminada', 'Cancelada')), 0) AS faltan, "
-            + "(SELECT MIN(cf.stock_actual / cf.cantidad_necesaria) FROM componentes_fabricacion cf "
-            + "WHERE cf.id_producto = p.id_producto) AS montables "
-            + "FROM productos p WHERE EXISTS "
-            + "(SELECT 1 FROM componentes_fabricacion cf WHERE cf.id_producto = p.id_producto)) t "
-            + "WHERE faltan > 0 ORDER BY id_producto";
-
-    // Al entrar en Fabricacion: avisa de lo que hay que montar para pedidos y pregunta si se crean las ordenes
-    public static void avisarFaltaFabricar(Connection con) throws SQLException {
-        List<int[]> aFabricar = new ArrayList<>();   // {id, unidades que faltan}
-        List<String> nombres = new ArrayList<>();
-        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(SQL_PRODUCTOS_A_FABRICAR)) {
-            while (rs.next()) {
-                aFabricar.add(new int[]{rs.getInt(1), rs.getInt(3)});
-                nombres.add(rs.getString(2));
-            }
-        }
-        if (aFabricar.isEmpty()) return;
-        System.out.println("\n!! AVISO: hay " + aFabricar.size() + " producto(s) que hay que fabricar para pedidos:");
-        for (int i = 0; i < aFabricar.size(); i++) {
-            System.out.println("   - " + nombres.get(i) + " -> FALTAN " + aFabricar.get(i)[1] + " para pedidos sin enviar");
-        }
-        if (!Utilidades.preguntarSiNo("Quieres crear las ordenes de fabricacion ahora?")) return;
-        for (int i = 0; i < aFabricar.size(); i++) {
-            int idProducto = aFabricar.get(i)[0];
-            int faltan = aFabricar.get(i)[1];
-            if (!Utilidades.preguntarSiNo("Crear una orden de " + faltan + " x '" + nombres.get(i) + "'?")) continue;
-            if (!piezasSuficientes(con, idProducto, faltan)) {
-                System.out.println("Aviso: la orden se crea, pero no se podra terminar hasta que lleguen las piezas");
-            }
-            int id = crearOrden(con, null, idProducto, faltan);
-            System.out.println("[FABRICACION] Orden " + id + " creada: " + faltan + " unidad(es) (estado: Pendiente). "
-                    + "Terminala en 'Terminar una orden'");
-        }
-    }
-
     // FABRICACION: piezas que lleva un producto y cuantas unidades se pueden montar
     public static void verPiezasDeProducto(Connection con) throws SQLException {
         if (!listarProductosFabricables(con)) return;
@@ -801,20 +759,6 @@ public class Inventario {
         return tramitarCompra(con, idCompra);
     }
 
-    // Lo mismo para una pieza de fabricacion
-    public static boolean reponerComponente(Connection con, Comp c, int cantidad) throws SQLException {
-        int idCompra = Utilidades.buscarId(con, "SELECT id_compra FROM compras WHERE id_componente = ? "
-                + "AND estado IN ('Pendiente', 'Aceptada') ORDER BY id_compra LIMIT 1", c.id());
-        if (idCompra > 0) {
-            System.out.println("[COMPRAS] Ya hay un pedido de compra en camino para " + c.nombre() + ": " + idCompra);
-        } else {
-            idCompra = crearCompraComponente(con, c.id(), cantidad);
-            if (idCompra < 0) return false;
-            System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado: " + cantidad + " x " + c.nombre());
-        }
-        return tramitarCompra(con, idCompra);
-    }
-
     // Despues de vender: si un producto que compramos hecho se ha quedado sin stock,
     // pregunta si se pide mas al proveedor
     public static void comprobarAgotado(Connection con, int idProducto) throws SQLException {
@@ -842,11 +786,6 @@ public class Inventario {
 
     public static boolean seFabrica(Connection con, int idProducto) throws SQLException {
         return Utilidades.existe(con, "SELECT 1 FROM componentes_fabricacion WHERE id_producto = ?", idProducto);
-    }
-
-    public static int stockComponente(Connection con, int idComponente) throws SQLException {
-        return Math.max(0, Utilidades.buscarId(con,
-                "SELECT stock_actual FROM componentes_fabricacion WHERE id_componente = ?", idComponente));
     }
 
     // Marca la compra como recibida y suma las unidades al stock (de la pieza o del producto terminado)
@@ -922,26 +861,97 @@ public class Inventario {
     // ============================================================
     // FABRICACION
     // ============================================================
-    // Fabricacion crea una orden para tener unidades en stock (sin pedido de un cliente)
-    public static void crearOrdenMenu(Connection con) throws SQLException {
+    // Las ordenes de fabricacion no las crea Fabricacion: se crean solas en cuanto se confirma
+    // un pedido (el cliente acepta la oportunidad o hace su pedido) y no hay stock suficiente.
+    // Fabricacion solo las empieza ('En proceso') y las termina ('Terminada')
+
+    // Crea la orden de un pedido y pide a Compras las piezas que falten. Devuelve el ID de la orden
+    public static int crearOrdenParaPedido(Connection con, int idPedido, int idProducto, String nombre, int unidades)
+            throws SQLException {
+        int idOrden = crearOrden(con, idPedido, idProducto, unidades);
+        System.out.println("[FABRICACION] Orden " + idOrden + " creada automaticamente: " + unidades + " x " + nombre
+                + " para el pedido " + idPedido);
+        pedirPiezasQueFaltan(con, idProducto);
+        return idOrden;
+    }
+
+    // Pide a Compras las piezas que no llegan para las ordenes abiertas de un producto, descontando
+    // el stock de la pieza y lo que ya esta en camino. Los pedidos de compra quedan 'Pendiente'
+    private static void pedirPiezasQueFaltan(Connection con, int idProducto) throws SQLException {
+        int unidadesAbiertas = Utilidades.buscarId(con, "SELECT COALESCE(SUM(cantidad), 0) FROM fabricacion "
+                + "WHERE id_producto = ? AND estado NOT IN ('Terminada', 'Cancelada')", idProducto);
+        for (Comp c : cargarComponentes(con, idProducto, false)) {
+            int enCamino = Utilidades.buscarId(con, "SELECT COALESCE(SUM(cantidad), 0) FROM compras "
+                    + "WHERE id_componente = ? AND estado IN ('Pendiente', 'Aceptada')", c.id());
+            int faltan = c.necesaria() * unidadesAbiertas - c.stock() - enCamino;
+            if (faltan <= 0) continue;
+            int idCompra = crearCompraComponente(con, c.id(), faltan);
+            if (idCompra > 0) {
+                System.out.println("[COMPRAS] Pedido de compra " + idCompra + " creado: " + faltan + " x " + c.nombre()
+                        + " (Compras registra su llegada)");
+            }
+        }
+    }
+
+    // Al entrar en Fabricacion: avisa de las ordenes que estan sin terminar
+    public static void avisarOrdenesAbiertas(Connection con) throws SQLException {
+        String sql = "SELECT COUNT(*) FILTER (WHERE estado = 'Pendiente'), "
+                   + "COUNT(*) FILTER (WHERE estado = 'En proceso') FROM fabricacion";
+        try (Statement st = con.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            int pendientes = rs.getInt(1);
+            int enProceso = rs.getInt(2);
+            if (pendientes + enProceso == 0) return;
+            System.out.println("\n!! AVISO: hay " + pendientes + " orden(es) sin empezar y " + enProceso
+                    + " en proceso. Miralas en 'Ver ordenes de fabricacion'");
+        }
+    }
+
+    // Fabricacion empieza a montar una orden: pasa de 'Pendiente' a 'En proceso'.
+    // Solo se puede empezar si ya estan todas las piezas en el almacen
+    public static void empezarOrdenMenu(Connection con) throws SQLException {
         if (!Usuarios.exigir("fabricacion")) return;
-        if (!listarProductosFabricables(con)) return;
-        int idProducto = Utilidades.leerEntero("ID del producto a fabricar (0 = cancelar): ");
-        if (idProducto == 0) return;
-        if (!seFabrica(con, idProducto)) {
-            System.out.println("Ese producto no tiene piezas definidas, asi que no se puede fabricar");
+        if (!listarOrdenes(con, true)) return;
+        int id = Utilidades.leerEntero("ID de la orden a empezar (0 = cancelar): ");
+        if (id == 0) return;
+        String estado = null;
+        int idProducto = 0;
+        int cantidad = 0;
+        try (PreparedStatement ps = con.prepareStatement(
+                "SELECT estado, id_producto, cantidad FROM fabricacion WHERE id_montaje = ?")) {
+            ps.setInt(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    estado = rs.getString(1);
+                    idProducto = rs.getInt(2);
+                    cantidad = rs.getInt(3);
+                }
+            }
+        }
+        if (!"Pendiente".equals(estado)) {
+            System.out.println(estado == null ? "No existe esa orden"
+                    : "Solo se pueden empezar las ordenes 'Pendiente' (esta esta '" + estado + "')");
             return;
         }
-        int cantidad = Utilidades.leerEntero("Unidades a fabricar: ");
-        if (cantidad <= 0) {
-            System.out.println("La cantidad debe ser mayor que 0");
+        boolean faltanPiezas = false;
+        for (Comp c : cargarComponentes(con, idProducto, false)) {
+            if (c.stock() < c.necesaria() * cantidad) {
+                faltanPiezas = true;
+                System.out.println("Falta pieza: " + c.nombre() + " (hay " + c.stock()
+                        + ", hacen falta " + c.necesaria() * cantidad + ")");
+            }
+        }
+        if (faltanPiezas) {
+            System.out.println("No se puede empezar todavia: Compras tiene que registrar la llegada de las piezas "
+                    + "(Compras > 'Registrar la llegada de un pedido')");
             return;
         }
-        if (!piezasSuficientes(con, idProducto, cantidad)) {
-            System.out.println("Aviso: la orden se crea, pero no se podra terminar hasta que lleguen las piezas");
+        try (PreparedStatement ps = con.prepareStatement(
+                "UPDATE fabricacion SET estado = 'En proceso' WHERE id_montaje = ?")) {
+            ps.setInt(1, id);
+            ps.executeUpdate();
         }
-        int id = crearOrden(con, null, idProducto, cantidad);
-        System.out.println("[FABRICACION] Orden " + id + " creada: " + cantidad + " unidad(es) (estado: Pendiente)");
+        System.out.println("[FABRICACION] Orden " + id + " EN PROCESO. Cuando este montada, terminala");
     }
 
     // Crea una orden de fabricacion. idPedido = null si es para stock. Devuelve su ID
@@ -969,39 +979,16 @@ public class Inventario {
         }
     }
 
-    // Comprueba las piezas para montar 'unidades'. Si faltan, ofrece pedirlas al proveedor
-    private static boolean piezasSuficientes(Connection con, int idProducto, int unidades) throws SQLException {
-        boolean todoBien = true;
-        for (Comp c : cargarComponentes(con, idProducto, false)) {
-            int necesario = c.necesaria() * unidades;
-            int deficit;
-            while ((deficit = necesario - stockComponente(con, c.id())) > 0) {
-                System.out.println("[FABRICACION] Falta pieza: " + c.nombre() + " (hacen falta " + necesario
-                        + ", faltan " + deficit + ")");
-                if (!Utilidades.preguntarSiNo("   Pedir las " + deficit + " que faltan al proveedor?")
-                        || !reponerComponente(con, c, deficit)) {
-                    todoBien = false;
-                    break;
-                }
-            }
-        }
-        return todoBien;
-    }
-
+    // Solo se terminan las ordenes que Fabricacion ya ha empezado ('En proceso')
     public static void terminarOrdenMenu(Connection con) throws SQLException {
         if (!Usuarios.exigir("fabricacion")) return;
         if (!listarOrdenes(con, true)) return;
         int id = Utilidades.leerEntero("ID de la orden a terminar (0 = cancelar): ");
         if (id == 0) return;
-        String abierta = "FROM fabricacion WHERE id_montaje = ? AND estado NOT IN ('Terminada', 'Cancelada')";
-        int idProducto = Utilidades.buscarId(con, "SELECT id_producto " + abierta, id);
-        if (idProducto < 0) {
-            System.out.println("Esa orden no existe o ya esta cerrada");
-            return;
-        }
-        int cantidad = Utilidades.buscarId(con, "SELECT cantidad " + abierta, id);
-        if (!piezasSuficientes(con, idProducto, cantidad)) {
-            System.out.println("No se puede terminar la orden: faltan piezas. Vuelve a intentarlo cuando lleguen");
+        int cantidad = Utilidades.buscarId(con,
+                "SELECT cantidad FROM fabricacion WHERE id_montaje = ? AND estado = 'En proceso'", id);
+        if (cantidad < 0) {
+            System.out.println("Esa orden no esta 'En proceso': primero hay que empezarla");
             return;
         }
         if (terminarMontaje(con, id)) {
@@ -1010,7 +997,7 @@ public class Inventario {
         }
     }
 
-    // Solo se cancelan las ordenes para stock: las de un pedido las espera un cliente
+    // Solo se cancelan las ordenes para stock (las antiguas): las de un pedido las espera un cliente
     public static void cancelarOrdenMenu(Connection con) throws SQLException {
         if (!Usuarios.exigir("fabricacion")) return;
         if (!listarOrdenes(con, true)) return;
